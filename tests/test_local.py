@@ -1252,6 +1252,77 @@ def test_guide_flags_terms_absent_from_material():
     assert "方法追踪" not in odd
 
 
+def test_summary_without_outline_strips_duplicated_chapter_list():
+    """剥掉全课摘要末尾自带的「大纲：」逐章列表。
+
+    那个列表与紧随其后的章节表格列的是同一批章节（实测标题 23/23 一致、
+    描述相似度 0.60），而且更差——没有时间。摘要 4542 字里 4190 字是它。
+    """
+    from vedioai.context import summary_without_outline
+
+    summary = (
+        "本课程围绕反编译展开。\n\n"
+        "大纲：\n"
+        "- 定位代码关键的方法：反编译后不知道代码在哪\n"
+        "- 加密算法分析与DDMS方法追踪：讲 Base64 和 AES\n"
+    )
+    out = summary_without_outline(summary)
+    assert out == "本课程围绕反编译展开。"
+    assert "大纲" not in out
+
+
+def test_summary_without_outline_keeps_prose_after_marker():
+    """「大纲」后面若有正文（不只是列表项），宁可留着重复也不误删正文。"""
+    from vedioai.context import summary_without_outline
+
+    summary = (
+        "摘要正文。\n\n"
+        "大纲：\n"
+        "- 第一条\n"
+        "这段是结论，不是列表项，必须保住。\n"
+    )
+    out = summary_without_outline(summary)
+    assert out == summary, "拿不准就不动"
+    assert "必须保住" in out
+
+
+def test_summary_without_outline_noop_without_marker():
+    from vedioai.context import summary_without_outline
+
+    assert summary_without_outline("只有一段摘要，没有列表。") == "只有一段摘要，没有列表。"
+    assert summary_without_outline("") == ""
+
+
+def test_prefix_does_not_repeat_chapters_from_summary_outline():
+    """前缀里同一章不该出现两遍：摘要自带的列表要剥掉，只留结构那一次。"""
+    from vedioai.context import build_full_prefix, build_outline_prefix
+    from vedioai.schema import Chapter, Chunk, Video, VideoStatus
+
+    video = Video(
+        video_id="v1", path="x.mp4", title="课", duration_ms=600_000, status=VideoStatus.READY
+    )
+    chapters = [
+        Chapter(chapter_id="h1", idx=0, start_ms=0, end_ms=300_000, title="甲章", summary="甲"),
+        Chapter(
+            chapter_id="h2", idx=1, start_ms=300_000, end_ms=600_000, title="乙章", summary="乙"
+        ),
+    ]
+    chunks = [
+        Chunk(chunk_id="c1", idx=0, start_ms=0, end_ms=1000, text="正文", parent_id="h1"),
+        Chunk(chunk_id="c2", idx=1, start_ms=300_000, end_ms=301_000, text="正文", parent_id="h2"),
+    ]
+    summary = "总述。\n\n大纲：\n- 甲章：讲甲\n- 乙章：讲乙\n"
+
+    for fn in (build_full_prefix, build_outline_prefix):
+        out = fn(video, chapters, chunks, video_summary=summary)
+        # 摘要里那份列表要消失（注意 build_outline_prefix 的标题本身含「课程大纲：」，
+        # 所以只能断言列表项本身不在了）
+        assert "- 甲章：讲甲" not in out
+        assert "- 乙章：讲乙" not in out
+        assert "总述。" in out
+        assert out.count("甲章") == 1, f"{fn.__name__} 里甲章出现了 {out.count('甲章')} 次"
+
+
 def test_collect_context_separates_ground_truth_from_summaries(store: Store):
     """摘要（LLM 写的）不能进证据池，否则等于用幻觉校验幻觉。
 

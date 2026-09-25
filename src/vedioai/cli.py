@@ -22,6 +22,7 @@ from .embedding import Embedder, Reranker, build_embedder, build_local_models
 from .llm.client import from_llm_config
 from .ingest.asr_volc import VolcASRClient
 from .llm.client import LLMClient, LLMError
+from .context import estimate_tokens, summary_without_outline
 from .notes import NotesService
 from .pipeline import IngestPipeline, video_id_for
 from .schema import ms_to_hms
@@ -239,7 +240,10 @@ def cmd_info(args, cfg) -> int:
     summary = store.get_video_summary(video_id)
     if summary:
         print("\n全课摘要：")
-        print(summary[:1200])
+        # 剥掉自带的「大纲：」列表：下面就会打印章节列表。
+        # 顺带修掉一个显示问题：原来 summary[:1200] 会把 1200 字全花在
+        # 那份列表上（摘要正文只有 352 字），正文反而被挤掉。
+        print(summary_without_outline(summary)[:1200])
 
     if chapters:
         print("\n章节：")

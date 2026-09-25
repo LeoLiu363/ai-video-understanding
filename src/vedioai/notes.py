@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-from .context import estimate_tokens
+from .context import estimate_tokens, summary_without_outline
 from .glossary import Glossary, render_findings
 from .llm import prompts
 from .llm.client import LLMClient, LLMError, Usage
@@ -177,7 +177,9 @@ class NotesService:
             "",
         ]
         if summary:
-            lines += [summary.strip(), ""]
+            # 剥掉摘要自带的「大纲：」列表——下面紧跟的「课程大纲」表格列的是
+            # 同一批章节，且多一列时间。留着就是同一份内容连着出现两遍。
+            lines += [summary_without_outline(summary).strip(), ""]
         else:
             # 没有全课摘要时，让模型补一段「你将学到」
             body = self._chapter_digest(chapters, chunks)
@@ -221,7 +223,8 @@ class NotesService:
         """
         body = self._chapter_digest(chapters, chunks)
         if summary:
-            body = f"## 全课摘要\n{summary.strip()}\n\n{body}"
+            # 摘要里的「大纲：」列表在 chapter_digest 里已经逐章给了，去掉免得占额度
+            body = f"## 全课摘要\n{summary_without_outline(summary).strip()}\n\n{body}"
         messages = [
             {"role": "system", "content": prompts.SYSTEM_TUTOR},
             {"role": "user", "content": f"{prompts.NOTES_GUIDE}\n\n---\n{body}"},

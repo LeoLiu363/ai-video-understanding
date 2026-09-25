@@ -13,6 +13,8 @@
 
 from __future__ import annotations
 
+import re
+
 from .schema import Chapter, Chunk, Video, ms_to_hms
 
 
@@ -72,7 +74,8 @@ def build_full_prefix(
     parts.append(f"总时长：{ms_to_hms(video.duration_ms)}")
 
     if video_summary:
-        parts.append("\n## 全课摘要\n" + video_summary.strip())
+        # 剥掉摘要自带的「大纲：」列表：下面紧接着就按章节列一遍，且带时间。
+        parts.append("\n## 全课摘要\n" + summary_without_outline(video_summary).strip())
 
     if chapters:
         parts.append("\n## 章节结构")
@@ -146,7 +149,8 @@ def build_outline_prefix(
     parts: list[str] = [f"# 课程大纲：{video.title or '未命名课程'}"]
     parts.append(f"总时长：{ms_to_hms(video.duration_ms)}")
     if video_summary:
-        parts.append("\n## 全课摘要\n" + video_summary.strip())
+        # 同上：下面会逐章展开，摘要里的「大纲：」列表是重复的。
+        parts.append("\n## 全课摘要\n" + summary_without_outline(video_summary).strip())
 
     by_parent: dict[str, list[Chunk]] = {}
     for chunk in chunks:
@@ -181,6 +185,42 @@ def build_citation_prefix(chunks: list[Chunk]) -> str:
 def _compact(text: str, limit: int = 400) -> str:
     text = " / ".join(line.strip() for line in text.splitlines() if line.strip())
     return text if len(text) <= limit else text[:limit] + "…"
+
+
+# 存库摘要里「大纲：」这一行（容忍 ## 前缀与加粗）
+_SUMMARY_OUTLINE_MARK = re.compile(r"^\s*(?:#{1,6}\s*)?(?:\*\*)?\s*大纲\s*(?:\*\*)?\s*[:：]\s*$")
+_SUMMARY_ITEM = re.compile(r"^\s*(?:[-*•]|\d+[.、)）])\s*\S")
+
+
+def summary_without_outline(summary: str) -> str:
+    """去掉全课摘要末尾自带的「大纲：」逐章列表。
+
+    存库的 video_summary 由 VIDEO_SUMMARY 提示词生成，那个提示词同时要求
+    `"summary"` 和 `"outline"`——而 outline 是让模型把**刚给它的章节摘要再列
+    一遍**，属于信息复用而非推导。于是摘要里 92% 的字数（实测 4542 字中的
+    4190 字）是这份列表，而所有调用方紧接着就会把同样的章节再列一遍：
+
+    - notes.md：后面紧跟「课程大纲」表格（标题 23/23 完全一致，描述相似度 0.60）
+    - build_full_prefix：「## 章节结构」
+    - build_outline_prefix：逐章展开
+    - `vedioai show` / `/api/library`：分别打印章节列表
+
+    而且重复的那一份更差——它没有时间。所以这里在渲染时剥掉，不动库里数据，
+    零 LLM 成本，已有课程立即生效。
+
+    只在「标记行之后全是列表项或空行」时才截断：万一模型把大纲写在摘要中间，
+    宁可留着重复，也不要误删正文。
+    """
+    if not summary:
+        return summary
+    lines = summary.splitlines()
+    for i, line in enumerate(lines):
+        if not _SUMMARY_OUTLINE_MARK.match(line):
+            continue
+        rest = [item for item in lines[i + 1 :] if item.strip()]
+        if rest and all(_SUMMARY_ITEM.match(item) for item in rest):
+            return "\n".join(lines[:i]).rstrip()
+    return summary
 
 
 def estimate_tokens(text: str) -> int:

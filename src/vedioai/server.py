@@ -20,6 +20,7 @@ from pydantic import BaseModel
 
 from .ask import AskService
 from .config import Config
+from .context import summary_without_outline
 from .embedding import Embedder, Reranker, build_embedder
 from .ingest.asr_volc import VolcASRClient
 from .jobs import JobRegistry
@@ -108,7 +109,9 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         chapters = store.get_chapters(video_id)
         return {
             "video": {**video.to_row(), "duration_label": ms_to_hms(video.duration_ms)},
-            "summary": store.get_video_summary(video_id),
+            # 剥掉摘要自带的「大纲：」列表：下面 chapters 字段已经列了同一批章节
+            "summary": summary_without_outline(store.get_video_summary(video_id) or ""),
+
             "chapters": [
                 {
                     "chapter_id": ch.chapter_id,
