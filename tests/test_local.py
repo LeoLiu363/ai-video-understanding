@@ -1142,6 +1142,116 @@ def test_chapter_transcript_no_false_truncation_notice():
     assert "课件" in out and "第二行" in out and "正文" in out
 
 
+def test_guide_keeps_only_paragraphs_anchored_to_real_timestamps():
+    """导读里核不上时间点的段落必须整段丢弃。
+
+    这是一道防「课程外内容」的机械兜底。参考过的一份同类产品把老师写在 SD 卡上的
+    日志改写成「Android 10+ 应写入应用私有目录」的官方推荐——与课程内容正好相反。
+    提示词拦不住这类事，所以要求每段都以 `> 时间 MM:SS` 结尾并核对锚点：
+    课程之外的内容拿不到合法时间点，因此无法活下来。
+    """
+    from vedioai.notes import _time_anchors, _verify_guide
+    from vedioai.schema import Chapter, Chunk
+
+    chapters = [
+        Chapter(chapter_id="h1", idx=0, start_ms=0, end_ms=600_000, title="甲", summary=""),
+        Chapter(
+            chapter_id="h2", idx=1, start_ms=960_000, end_ms=1_800_000, title="乙", summary=""
+        ),
+    ]
+    chunks = [
+        Chunk(chunk_id="c1", idx=0, start_ms=55_000, end_ms=60_000, text="正文"),
+        Chunk(chunk_id="c2", idx=1, start_ms=1_820_000, end_ms=1_830_000, text="正文"),
+    ]
+    anchors = _time_anchors(chapters, chunks)
+    assert anchors == [0, 55_000, 960_000, 1_820_000]
+
+    text = """## 学习导读
+
+### 真在课程里的
+描述。
+> 时间 00:55
+
+### 时间点编的
+描述。
+> 时间 25:00
+
+### 讲的是课程外的事
+Android 10+ 应该改用应用私有目录。
+> 时间 40:00
+
+### 时间格式都不合法的
+描述。
+> 时间 99:99
+
+### 没有任何锚点
+这段不该留下。
+"""
+    body, kept, dropped = _verify_guide(text, anchors)
+    assert kept == 1
+    # 25:00 / 40:00 是「合法格式但核不上」→ 记入 dropped；
+    # 99:99 连 MM:SS 都不是，按正文处理，同样进不了正文（见下面的断言）。
+    assert dropped == 2
+    assert "真在课程里的" in body
+    for gone in ("时间点编的", "讲的是课程外的事", "时间格式都不合法的", "没有任何锚点"):
+        assert gone not in body
+    assert "Android 10+ 应该改用应用私有目录" not in body
+    # 标题不该被重复带进来（调用方自己加）
+    assert "学习导读" not in body
+
+
+def test_guide_does_not_mistake_prose_for_a_citation():
+    """正文里出现「时间」二字、或出现比例这类数字，不能被误判成时间标注。"""
+    from vedioai.notes import _guide_citation
+
+    assert _guide_citation("时间管理很重要。") is None
+    assert _guide_citation("画面比例 16:9，这里是讲解。") is None
+    assert _guide_citation("> 时间 00:55") == "00:55"
+    assert _guide_citation("> **时间 00:55**") == "00:55"
+
+
+def test_guide_drops_invalid_time_but_keeps_valid_on_same_line():
+    """一行里既有合法又有非法时间点时，只保留合法的那个。"""
+    from vedioai.notes import _verify_guide
+
+    anchors = [0, 55_000, 1_820_000]
+    text = "### 小节\n描述。\n> 时间 00:55、25:00\n"
+    body, kept, dropped = _verify_guide(text, anchors)
+    assert kept == 1 and dropped == 0
+    assert "00:55" in body and "25:00" not in body
+
+
+def test_guide_is_omitted_when_nothing_can_be_anchored():
+    """整篇都核不上时返回空，调用方据此略去整个导读段落。"""
+    from vedioai.notes import _verify_guide
+
+    text = "## 学习导读\n\n### 甲\n描述。\n> 时间 40:00\n"
+    body, kept, dropped = _verify_guide(text, [0, 55_000])
+    assert body == "" and kept == 0 and dropped == 1
+
+
+def test_guide_flags_terms_absent_from_material():
+    """导读里出现原始材料没有的英文词时，要能被识别出来（只告警，不改写）。
+
+    时间锚点保证「这段话指向真实位置」，但管不了段内的**术语**是不是外加的。
+    本课导读就混进过一个 `Method Tracing`——视频里老师只说「方法追踪」。
+    """
+    from vedioai.notes import _unverified_terms
+
+    material = "老师用 DDMS 做方法追踪，看到 Encrypt.md5 的调用栈。"
+    guide = (
+        "### 甲\n"
+        "用 `DDMS` 对进程做方法追踪（Method Tracing），定位到 `Encrypt.md5`。\n"
+        "> 时间 00:55\n"
+    )
+    odd = _unverified_terms(guide, material)
+    assert "Tracing" in odd
+    # 材料里有的词不该被误报
+    assert "DDMS" not in odd
+    assert "Encrypt.md5" not in odd
+    assert "方法追踪" not in odd
+
+
 def test_collect_context_separates_ground_truth_from_summaries(store: Store):
     """摘要（LLM 写的）不能进证据池，否则等于用幻觉校验幻觉。
 
