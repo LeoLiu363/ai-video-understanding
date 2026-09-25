@@ -23,6 +23,7 @@ from .ask import AskService
 from .config import Config
 from .context import summary_without_outline
 from .embedding import Embedder, Reranker, build_embedder
+from . import ledger
 from .ingest.asr_volc import VolcASRClient
 from .jobs import JobRegistry
 from .llm.client import LLMClient, from_llm_config
@@ -69,12 +70,16 @@ def create_app(cfg: Config | None = None) -> FastAPI:
     reranker = Reranker(cfg.rerank_model_dir)
 
     def make_llm() -> LLMClient:
-        return from_llm_config(cfg.llm)
+        # 挂上记账：挂在客户端出口上，所以问答/摘要/文档全都自动被记，
+        # 新增调用点也不会漏（见 ledger.recorder）
+        return ledger.attach(from_llm_config(cfg.llm), store)
 
     def make_vision() -> LLMClient | None:
         if not cfg.vision.api_key:
             return None
-        return LLMClient(cfg.vision.api_key, cfg.vision.base_url, cfg.vision.model)
+        return ledger.attach(
+            LLMClient(cfg.vision.api_key, cfg.vision.base_url, cfg.vision.model), store
+        )
 
     app.state.store = store
     app.state.jobs = jobs
@@ -304,6 +309,25 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             raise HTTPException(404, "幻灯片图片已清理")
         mime = mimetypes.guess_type(path.name)[0] or "image/jpeg"
         return FileResponse(path, media_type=mime)
+
+    @app.get("/api/usage")
+    def usage(video_id: str = "") -> dict:
+        """用量账本。video_id 省略 = 全库汇总。
+
+        带上单价表与「高峰/闲时」判定依据，因为估价随计费时段翻倍——
+        界面要能说清这个数是怎么来的。
+        """
+        data = store.usage_summary(video_id or None)
+        data["peak_now"] = ledger.is_peak()
+        data["prices"] = {
+            model: {
+                tier: {"hit": p.hit, "miss": p.miss, "out": p.out}
+                for tier, p in tiers.items()
+            }
+            for model, tiers in ledger.PRICES.items()
+        }
+        data["asr_yuan_per_hour"] = ledger.ASR_YUAN_PER_HOUR
+        return data
 
     @app.get("/api/health")
     def health() -> dict:

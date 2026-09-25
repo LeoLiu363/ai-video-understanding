@@ -492,6 +492,61 @@ def test_library_payload_drops_fields_the_ui_never_reads(
         assert any(marker in s["ocr_text"] for s in full["slides"])
 
 
+def test_http_usage_ledger_endpoint(cfg: Config, video_file: Path):
+    """用量账本接口：全库汇总 + 单课汇总，都要能读出来。
+
+    这个接口存在的理由：以前没有任何地方能回答「这门课花了多少钱」——
+    summarize 把 usage 丢掉了、notes 算了却不落库。现在它是可查的。
+    """
+    from fastapi.testclient import TestClient
+
+    from vedioai.server import create_app
+
+    store = Store(cfg.db_path)
+    vid = IngestPipeline(cfg, store, llm=None, asr=StubASR()).run(
+        video_file, skip_summary=True
+    ).video_id
+    store.close()
+
+    app = create_app(cfg)
+    with TestClient(app) as client:
+        # 入库时跑过转写，所以账本里已经有 ASR 那一笔——这本身就是要验证的：
+        # 转写是唯一按音频时长计费的环节，必须自动进账。
+        base = client.get("/api/usage").json()
+        assert base["calls"] == 1
+        assert base["by_kind"][0]["kind"] == "asr"
+        assert base["audio_ms"] > 0
+        assert base["cost_yuan"] > 0
+        # 单价表要随接口返回，界面才能解释「这个数怎么算出来的」
+        assert "deepseek-flash" in base["prices"]
+        assert isinstance(base["peak_now"], bool)
+
+        store2 = Store(cfg.db_path)
+        store2.record_usage(
+            kind="ask", model="deepseek-flash", video_id=vid,
+            prompt_tokens=1_000_000, cached_tokens=1_000_000, cost_yuan=0.02,
+        )
+        store2.record_usage(
+            kind="summarize", model="deepseek-flash", video_id=vid,
+            prompt_tokens=2_000_000, cached_tokens=0, completion_tokens=5_000,
+            cost_yuan=2.02, peak=True,
+        )
+        # 没有价目的调用（如视觉模型）也要能进账，并被标为未计价
+        store2.record_usage(kind="ask", model="doubao-seed", video_id=vid, cost_yuan=None)
+        store2.close()
+
+        all_usage = client.get("/api/usage").json()
+        assert all_usage["calls"] == 4
+        assert all_usage["unpriced_calls"] == 1
+        assert all_usage["cost_yuan"] == pytest.approx(base["cost_yuan"] + 2.04)
+        assert all_usage["by_video"][0]["video_id"] == vid
+
+        one = client.get("/api/usage", params={"video_id": vid}).json()
+        assert one["calls"] == 4
+        assert one["video_id"] == vid
+        assert {r["kind"] for r in one["by_kind"]} == {"ask", "summarize", "asr"}
+
+
 def test_scaffold_generates_40_slots(cfg: Config, video_file: Path, tmp_path: Path):
     from evals.run_eval import scaffold
 

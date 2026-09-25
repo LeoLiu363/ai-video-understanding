@@ -18,6 +18,7 @@ from pathlib import Path
 
 from .context import estimate_tokens, summary_without_outline
 from .glossary import Glossary, render_findings
+from . import ledger
 from .llm import prompts
 from .llm.client import LLMClient, LLMError, Usage
 from .schema import Chapter, Chunk, Video, ms_to_hms
@@ -60,6 +61,19 @@ class NotesService:
         self.glossary = Glossary.load(getattr(cfg, "glossary_path", None))
 
     def generate(
+        self,
+        video_id: str,
+        *,
+        save: bool = True,
+        force: bool = False,
+        progress=None,
+    ) -> NotesResult:
+        # 整篇文档的 LLM 调用都记在「notes + 本课」名下。作用域设在方法入口，
+        # 因为调用发生在调用方所在线程（任务线程）里，设在提交任务的外层无效。
+        with ledger.usage_scope("notes", video_id):
+            return self._generate(video_id, save=save, force=force, progress=progress)
+
+    def _generate(
         self,
         video_id: str,
         *,

@@ -17,6 +17,7 @@ import logging
 import mimetypes
 import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -129,6 +130,7 @@ class LLMClient:
         timeout: float = 300.0,
         supports_thinking: bool = False,
         thinking: bool | None = None,
+        on_usage: Callable[[Reply], None] | None = None,
     ):
         if not api_key:
             raise LLMError("LLM API Key 未配置")
@@ -142,6 +144,10 @@ class LLMClient:
         self.supports_thinking = supports_thinking
         # 默认思考开关。None = 不发送该字段（用服务端默认）。
         self.thinking = thinking
+        # 每次调用结束后的回调，用于记账。
+        # 挂在这里（唯一出口）而不是各调用点：靠调用点自觉上报的话，
+        # 漏一个就少记一笔账，而且不会报错——属于最难发现的错。
+        self.on_usage = on_usage
         self._client = httpx.Client(timeout=timeout)
 
     # ---------------------------------------------------------------- public
@@ -261,12 +267,27 @@ class LLMClient:
                 if resp.status_code >= 400:
                     raise LLMError(f"HTTP {resp.status_code}: {resp.text[:500]}")
                 data = resp.json()
-                return self._parse(data, payload["model"])
+                reply = self._parse(data, payload["model"])
+                self._notify_usage(reply)
+                return reply
             except (httpx.HTTPError, LLMError) as exc:
                 last_error = exc
                 if attempt < retries - 1:
                     time.sleep(2.0 * (attempt + 1))
         raise LLMError(f"调用失败（{payload['model']}）：{last_error}")
+
+    def _notify_usage(self, reply: Reply) -> None:
+        """上报一次成功调用的用量。
+
+        记账是旁路：它失败绝不能让一次**已经计过费**的调用变成失败，
+        否则用户不但花了钱，还拿不到结果，而且看不出真实原因。
+        """
+        if self.on_usage is None:
+            return
+        try:
+            self.on_usage(reply)
+        except Exception as exc:  # noqa: BLE001 — 旁路，任何异常都只记日志
+            log.warning("用量上报失败（不影响本次调用）：%s", exc)
 
     @staticmethod
     def _parse(data: dict, model: str) -> Reply:

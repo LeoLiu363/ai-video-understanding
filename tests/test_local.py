@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -25,6 +26,7 @@ from vedioai.ingest.segment import attach_parents, build_chapters, build_chunks 
 from vedioai.config import Config, RetrieveConfig, SlideConfig  # noqa: E402
 from vedioai.embedding import explain_ollama_failure  # noqa: E402
 from vedioai.glossary import Glossary, render_findings  # noqa: E402
+from vedioai import ledger  # noqa: E402
 from vedioai.selfcheck import check_embedding  # noqa: E402
 from vedioai.retrieve import Retriever  # noqa: E402
 from vedioai.schema import Chapter, Segment, Slide, Video, VideoStatus, hms_to_ms, ms_to_hms  # noqa: E402
@@ -1547,4 +1549,207 @@ def test_detect_slides_extracts_representative_frame_at_span_middle(monkeypatch,
     assert [s.start_ms for s in got] == [0, 2000, 4000]
     # 第一页区间 [0,2000)，中点 1000；第三页是最后一页，区间 [4000,6000)，中点 5000
     assert at_times == [1000, 3000, 5000], "代表帧不能固定取区间起点"
+
+
+# ------------------------------------------------------------------ 用量账本
+
+
+def test_ledger_charges_peak_and_off_peak_differently():
+    """峰谷分时定价：同一个调用放在上午和晚上，价钱差一倍。
+
+    官方是工作日 9:00–12:00、14:00–18:00 为高峰、其余（含周末）为闲时。
+    如果不分时段取价，账要么长期高估一倍、要么长期低估一半。
+    """
+    from datetime import datetime, timedelta, timezone
+
+    bj = timezone(timedelta(hours=8))
+    # 2026-09-25 是周五，2026-09-26 是周六
+    off = datetime(2026, 9, 25, 22, 0, tzinfo=bj)
+    peak = datetime(2026, 9, 25, 10, 0, tzinfo=bj)
+    weekend = datetime(2026, 9, 26, 10, 0, tzinfo=bj)
+
+    assert ledger.is_peak(peak) is True
+    assert ledger.is_peak(off) is False
+    assert ledger.is_peak(weekend) is False, "周末整天都按闲时计价"
+
+    # 边界：12:00 与 18:00 已经是闲时
+    assert ledger.is_peak(datetime(2026, 9, 25, 12, 0, tzinfo=bj)) is False
+    assert ledger.is_peak(datetime(2026, 9, 25, 18, 0, tzinfo=bj)) is False
+
+    kw = dict(prompt_tokens=100_000, cached_tokens=100_000, completion_tokens=1_000)
+    cheap = ledger.estimate_cost("deepseek-flash", at=off, **kw)
+    pricey = ledger.estimate_cost("deepseek-flash", at=peak, **kw)
+    assert pricey == pytest.approx(cheap * 2)
+
+
+def test_ledger_counts_cached_input_at_the_cheap_rate():
+    """缓存命中与未命中的单价差 50 倍，不能混为一谈。
+
+    这是本项目最核心的成本杠杆（前缀必须稳定就是为它服务的）。如果记账把
+    命中数当未命中算，账会虚高 50 倍，用户会误以为方案不可行。
+    """
+    all_hit = ledger.estimate_cost(
+        "deepseek-flash", prompt_tokens=1_000_000, cached_tokens=1_000_000
+    )
+    all_miss = ledger.estimate_cost(
+        "deepseek-flash", prompt_tokens=1_000_000, cached_tokens=0
+    )
+    assert all_hit == pytest.approx(0.02)   # 闲时命中 ¥0.02/M
+    assert all_miss == pytest.approx(1.0)    # 闲时未命中 ¥1/M
+
+
+def test_ledger_returns_none_for_unknown_model_instead_of_zero():
+    """查不到价目的模型必须返回 None（=「不知道」），不能返回 0。
+
+    返回 0 会让总账看起来是准确的，实际却漏掉了一部分花销——
+    这比不记账更危险，因为它会让人放心地下结论。
+    """
+    assert ledger.estimate_cost("some-unknown-model", prompt_tokens=1000) is None
+    assert ledger.estimate_cost("", prompt_tokens=1000) is None
+
+
+def test_ledger_cached_tokens_cannot_exceed_prompt_tokens():
+    """上游字段异常（命中数 > 输入数）时应封顶，不能算出负数未命中。"""
+    cost = ledger.estimate_cost(
+        "deepseek-flash", prompt_tokens=1000, cached_tokens=999_999
+    )
+    assert cost == pytest.approx(1000 * 0.02 / 1_000_000)
+
+
+def test_store_usage_summary_separates_priced_from_unpriced(store: Store, sample_video: Video):
+    """汇总必须把「未计价次数」暴露出来，否则总账会被误认为是全量。"""
+    store.record_usage(
+        kind="ask", model="deepseek-flash", video_id="v1",
+        prompt_tokens=100_000, cached_tokens=90_000, completion_tokens=500,
+        cost_yuan=0.02,
+    )
+    store.record_usage(
+        kind="notes", model="deepseek-flash", video_id="v1",
+        prompt_tokens=200_000, cached_tokens=0, completion_tokens=3_000,
+        cost_yuan=0.31, peak=True,
+    )
+    # 视觉模型走火山方舟，没有价目表
+    store.record_usage(
+        kind="ask", model="doubao-seed", video_id="v1",
+        prompt_tokens=5_000, cost_yuan=None,
+    )
+    store.record_usage(
+        kind="asr", model="volc.bigasr.auc_turbo", video_id="v1",
+        audio_ms=1_800_000, cost_yuan=0.4,
+    )
+
+    s = store.usage_summary("v1")
+    assert s["calls"] == 4
+    assert s["unpriced_calls"] == 1, "没有价目的那次必须被标出来"
+    assert s["cost_yuan"] == pytest.approx(0.73)
+    assert s["prompt_tokens"] == 305_000
+    assert s["audio_ms"] == 1_800_000
+
+    kinds = {r["kind"]: r for r in s["by_kind"]}
+    assert set(kinds) == {"ask", "notes", "asr"}
+    assert kinds["asr"]["cost"] == pytest.approx(0.4)
+
+    # 单课视图不需要按课程拆分；全库视图才有
+    assert s["by_video"] == []
+    full = store.usage_summary()
+    assert [v["video_id"] for v in full["by_video"]] == ["v1"]
+
+
+def test_store_record_usage_never_raises_on_failure(store: Store):
+    """记账是旁路：写库失败绝不能把一次已经付费的调用变成失败。
+
+    这里把连接换成必然抛错的桩，验证 record_usage 吞掉异常而不是往外抛。
+    """
+    class Boom:
+        def execute(self, *a, **kw):
+            raise sqlite3.OperationalError("database is locked")
+
+        def commit(self):
+            raise sqlite3.OperationalError("database is locked")
+
+    real = store.conn
+    store.conn = Boom()  # type: ignore[assignment]
+    try:
+        store.record_usage(kind="ask", model="m", video_id="v1", cost_yuan=1.0)
+    finally:
+        store.conn = real
+
+
+def test_usage_scope_tags_calls_with_purpose_and_course():
+    """用途与课程靠 contextvar 传递；嵌套时退出要恢复到外层。"""
+    assert ledger.current_kind() == "llm"
+    with ledger.usage_scope("ask", "v1"):
+        assert ledger.current_kind() == "ask"
+        assert ledger.current_video_id() == "v1"
+        with ledger.usage_scope("summarize", "v2"):
+            assert ledger.current_kind() == "summarize"
+            assert ledger.current_video_id() == "v2"
+        assert ledger.current_kind() == "ask", "退出内层要恢复外层，不能串味"
+        assert ledger.current_video_id() == "v1"
+    assert ledger.current_kind() == "llm"
+    assert ledger.current_video_id() == ""
+
+
+def test_ledger_recorder_writes_what_the_client_reports(store: Store):
+    """记账回调要把客户端上报的用量原样落库，并按模型取价。"""
+    from vedioai.llm.client import Reply, Usage
+
+    record = ledger.recorder(store)
+    with ledger.usage_scope("notes", "v1"):
+        record(Reply(
+            text="x",
+            usage=Usage(prompt_tokens=1_000_000, cached_tokens=1_000_000, completion_tokens=0),
+            model="deepseek-flash",
+        ))
+
+    s = store.usage_summary("v1")
+    assert s["calls"] == 1
+    assert s["by_kind"][0]["kind"] == "notes"
+    assert s["cost_yuan"] == pytest.approx(0.02)
+
+
+def test_client_swallows_usage_callback_failures():
+    """记账回调抛错时，客户端必须吞掉，不能让调用方看到异常。
+
+    保护点在客户端（`_notify_usage`），不在 Store：Store 只挡 sqlite 错误，
+    而回调里可能出任何错。一次调用已经计过费了，绝不能因为记账失败就报错。
+    """
+    from vedioai.llm.client import LLMClient, Reply, Usage
+
+    def boom(reply):
+        raise RuntimeError("disk full")
+
+    client = LLMClient("k", "http://example.invalid", "m", on_usage=boom)
+    client._notify_usage(Reply(text="x", usage=Usage(prompt_tokens=1), model="m"))
+
+
+def test_backfill_asr_usage_is_grounded_and_idempotent(store: Store, sample_video: Video):
+    """回填转写用量：只补「确实跑过转写」的课，且重复执行不翻倍。
+
+    回填的依据是事实而非猜测——库里有转写句说明 ASR 真跑过、真按音频时长
+    计过费，时长就在 videos 表里。没有转写的课程不能凭空记一笔，
+    否则这个账本会变成编造的数字，比不记还糟。
+    """
+    from vedioai.cli import _backfill_asr_usage
+
+    # sample_video 在夹具里没有转写句 → 不该被记
+    assert store.get_segments("v1") == []
+    assert _backfill_asr_usage(store) == 0
+    assert store.usage_summary()["calls"] == 0
+
+    store.replace_segments("v1", make_segments([(0, 1000, "这一节我们讲快速排序")]))
+    assert _backfill_asr_usage(store) == 1
+
+    s = store.usage_summary("v1")
+    assert s["calls"] == 1
+    assert s["by_kind"][0]["kind"] == "asr"
+    assert s["audio_ms"] == 600_000, "记的是音频时长，不是猜的数字"
+    # 汇总接口把金额四舍五入到 4 位小数，容差要跟着这个精度走
+    assert s["cost_yuan"] == pytest.approx(
+        600_000 / 3_600_000 * ledger.ASR_YUAN_PER_HOUR, abs=1e-4
+    )
+
+    # 再跑一次不能重复记账
+    assert _backfill_asr_usage(store) == 0
+    assert store.usage_summary("v1")["calls"] == 1
 

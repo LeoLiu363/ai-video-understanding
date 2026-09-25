@@ -191,6 +191,32 @@
   .reader-content { overflow-y: auto; padding: 26px 40px 120px; }
   .reader-content .inner { max-width: 900px; margin: 0 auto; }
   .reader-empty { max-width: 560px; margin: 60px auto; text-align: center; }
+
+  /* ------------------------------------------------ 用量账本 */
+  .usage-sec { margin-top: 16px; }
+  .usage-h {
+    font-size: 11px; letter-spacing: .8px; text-transform: uppercase;
+    color: var(--muted); margin-bottom: 6px;
+  }
+  .usage-big { font-size: 26px; font-weight: 600; line-height: 1.2; }
+  .usage-big small { font-size: 13px; font-weight: 400; color: var(--muted); margin-left: 6px; }
+  .usage-card {
+    background: var(--panel-2); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 12px 14px;
+  }
+  .usage-row {
+    display: flex; justify-content: space-between; gap: 10px;
+    padding: 5px 0; border-bottom: 1px dashed var(--line); font-size: 12.5px;
+  }
+  .usage-row:last-child { border-bottom: none; }
+  .usage-row .n { color: var(--muted); }
+  .usage-row .v { font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .usage-row .v.warn { color: var(--warn); }
+  .usage-tag {
+    font-size: 11px; padding: 1px 7px; border-radius: 999px;
+    border: 1px solid var(--line); color: var(--muted); margin-left: 6px;
+  }
+  .usage-tag.peak { color: var(--warn); border-color: #4d411f; }
 </style>
 </head>
 <body>
@@ -249,6 +275,7 @@
       <div class="tabs" style="margin-bottom:10px">
         <button id="tab-ask" class="on">问答</button>
         <button id="tab-notes">学习文档</button>
+        <button id="tab-usage">用量</button>
       </div>
 
       <!-- 问答 -->
@@ -276,6 +303,28 @@
         </div>
         <p class="hint" id="notes-empty" style="margin-top:10px"></p>
         <div id="notes-out" class="notes-out hidden" style="margin-top:10px"></div>
+      </div>
+
+      <!-- 用量账本 -->
+      <div id="panel-usage" class="hidden">
+        <div id="usage-current"></div>
+        <div class="usage-sec">
+          <div class="usage-h">全局用量</div>
+          <div id="usage-global" class="hint">加载中…</div>
+        </div>
+        <div class="usage-sec">
+          <div class="usage-h">按用途</div>
+          <div id="usage-kind" class="hint"></div>
+        </div>
+        <div class="usage-sec">
+          <div class="usage-h">按课程</div>
+          <div id="usage-video" class="hint"></div>
+        </div>
+        <div class="usage-sec">
+          <div class="usage-h">计价说明</div>
+          <div id="usage-price" class="hint"></div>
+        </div>
+        <button class="ghost" id="btn-usage-refresh" style="margin-top:10px">刷新</button>
       </div>
     </div>
   </section>
@@ -866,6 +915,97 @@ async function generateNotes() {
   }
 }
 
+/* ---------------------------------------------------------------- 用量账本 */
+
+const KIND_LABEL = {
+  ask: "问答", notes: "学习文档", summarize: "分层摘要",
+  glossary: "术语表", asr: "语音转写", llm: "其他",
+};
+
+function yuan(v) {
+  // 单次问答常在千分之几元，固定两位小数会全显示成 ¥0.00
+  const n = Number(v) || 0;
+  if (n === 0) return "¥0";
+  if (n < 0.01) return `¥${n.toFixed(4)}`;
+  if (n < 1) return `¥${n.toFixed(3)}`;
+  return `¥${n.toFixed(2)}`;
+}
+
+function usageRow(name, value, warn) {
+  return `<div class="usage-row"><span class="n">${esc(name)}</span>
+    <span class="v${warn ? " warn" : ""}">${value}</span></div>`;
+}
+
+async function loadUsage() {
+  let u;
+  try {
+    u = await api("/api/usage");
+  } catch (e) {
+    $("usage-global").textContent = `读取失败：${e.message}`;
+    return;
+  }
+  const peak = u.peak_now;
+  const tag = `<span class="usage-tag ${peak ? "peak" : ""}">${
+    peak ? "当前高峰计价" : "当前闲时计价"}</span>`;
+
+  $("usage-global").innerHTML = `
+    <div class="usage-card">
+      <div class="usage-big">${yuan(u.cost_yuan)}${tag}</div>
+      <div class="hint" style="margin-top:4px">
+        累计 ${u.calls} 次调用 · 输入 ${(u.prompt_tokens || 0).toLocaleString()} tokens
+        （命中 ${(u.cached_tokens || 0).toLocaleString()}）
+      </div>
+      ${u.unpriced_calls
+        ? `<div class="hint" style="color:var(--warn);margin-top:6px">
+             其中 ${u.unpriced_calls} 次调用没有价目，未计入金额——实际花费高于上面这个数</div>`
+        : ""}
+    </div>`;
+
+  $("usage-kind").innerHTML =
+    (u.by_kind || []).map((k) =>
+      usageRow(
+        KIND_LABEL[k.kind] || k.kind,
+        `${yuan(k.cost)} · ${k.calls} 次`,
+        !k.cost
+      )
+    ).join("") || '<div class="hint">暂无记录</div>';
+
+  $("usage-video").innerHTML =
+    (u.by_video || []).map((v) => usageRow(v.title || v.video_id, `${yuan(v.cost)} · ${v.calls} 次`)).join("")
+    || '<div class="hint">暂无记录</div>';
+
+  const flash = (u.prices || {})["deepseek-flash"] || {};
+  const op = flash.off_peak || {}, pk = flash.peak || {};
+  $("usage-price").innerHTML = `
+    <div class="hint">
+      deepseek-flash（元/百万 token）：闲时 命中 ${op.hit} / 未命中 ${op.miss} / 输出 ${op.out}；
+      高峰翻倍。<br>
+      高峰 = 北京时间工作日 9:00–12:00、14:00–18:00，其余含周末按闲时。<br>
+      语音转写按音频时长计费，此处按 ¥${u.asr_yuan_per_hour}/小时 估算；
+      官方给录音文件识别 20 小时免费额度，额度内实际不扣费。<br>
+      金额为估算值，以控制台账单为准。
+    </div>`;
+
+  if (currentId) {
+    try {
+      const c = await api(`/api/usage?video_id=${encodeURIComponent(currentId)}`);
+      $("usage-current").innerHTML = `
+        <div class="usage-h">本课程</div>
+        <div class="usage-card">
+          <div class="usage-big">${yuan(c.cost_yuan)}</div>
+          <div class="hint" style="margin-top:4px">${c.calls} 次调用${
+            c.calls ? "（" + (c.by_kind || []).map((k) => `${KIND_LABEL[k.kind] || k.kind} ${k.calls}`).join("、") + "）" : ""
+          }</div>
+        </div>`;
+    } catch (e) {
+      $("usage-current").innerHTML = "";
+    }
+  } else {
+    $("usage-current").innerHTML = "";
+  }
+}
+
+
 /* ---------------------------------------------------------------- 绑定 */
 
 $("btn-ingest").onclick = startIngest;
@@ -873,6 +1013,7 @@ $("btn-refresh").onclick = loadLibrary;
 $("btn-ask").onclick = ask;
 $("btn-notes").onclick = generateNotes;
 $("btn-read").onclick = openReader;
+$("btn-usage-refresh").onclick = loadUsage;
 $("reader-close").onclick = closeReader;
 $("reader-regen").onclick = () => {
   closeReader();
@@ -884,14 +1025,17 @@ $("question").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) ask();
 });
 
-$("tab-ask").onclick = () => {
-  $("tab-ask").classList.add("on"); $("tab-notes").classList.remove("on");
-  $("panel-ask").classList.remove("hidden"); $("panel-notes").classList.add("hidden");
-};
-$("tab-notes").onclick = () => {
-  $("tab-notes").classList.add("on"); $("tab-ask").classList.remove("on");
-  $("panel-notes").classList.remove("hidden"); $("panel-ask").classList.add("hidden");
-};
+/** 标签页切换。三个面板统一处理，避免每加一个 tab 就要改两处、漏一处。 */
+function showTab(name) {
+  for (const t of ["ask", "notes", "usage"]) {
+    $(`tab-${t}`).classList.toggle("on", t === name);
+    $(`panel-${t}`).classList.toggle("hidden", t !== name);
+  }
+  if (name === "usage") loadUsage();   // 每次进入都重新取，数字要是新的
+}
+$("tab-ask").onclick = () => showTab("ask");
+$("tab-notes").onclick = () => showTab("notes");
+$("tab-usage").onclick = () => showTab("usage");
 
 /** 下载当前 notes.md。 */
 function downloadNotes() {

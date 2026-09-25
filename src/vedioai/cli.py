@@ -23,6 +23,7 @@ from .llm.client import from_llm_config
 from .ingest.asr_volc import VolcASRClient
 from .llm.client import LLMClient, LLMError
 from .context import estimate_tokens, summary_without_outline
+from . import ledger
 from .notes import NotesService
 from .pipeline import IngestPipeline, video_id_for
 from .schema import ms_to_hms
@@ -53,21 +54,24 @@ def _setup_logging(verbose: bool) -> None:
             logging.getLogger(name).setLevel(logging.WARNING)
 
 
-def _make_clients(cfg, *, need_asr=False, need_llm=False, need_vision=False):
+def _make_clients(cfg, *, need_asr=False, need_llm=False, need_vision=False, store=None):
     asr = None
     llm = None
     vision = None
     if need_asr:
         asr = VolcASRClient(cfg.asr)
     if need_llm:
-        llm = from_llm_config(cfg.llm)
+        llm = ledger.attach(from_llm_config(cfg.llm), store)
     if need_vision and cfg.vision.api_key:
-        vision = LLMClient(
-            cfg.vision.api_key,
-            cfg.vision.base_url,
-            cfg.vision.model,
-            temperature=0.2,
-            max_tokens=4096,
+        vision = ledger.attach(
+            LLMClient(
+                cfg.vision.api_key,
+                cfg.vision.base_url,
+                cfg.vision.model,
+                temperature=0.2,
+                max_tokens=4096,
+            ),
+            store,
         )
     return asr, llm, vision
 
@@ -175,7 +179,7 @@ def cmd_ingest(args, cfg) -> int:
         return 1
 
     store = Store(cfg.db_path)
-    asr, llm, _ = _make_clients(cfg, need_asr=True, need_llm=not args.no_summary)
+    asr, llm, _ = _make_clients(cfg, need_asr=True, need_llm=not args.no_summary, store=store)
     embedder = build_embedder(cfg)
 
     if args.no_slides:
@@ -256,7 +260,7 @@ def cmd_info(args, cfg) -> int:
 
 def cmd_ask(args, cfg) -> int:
     store = Store(cfg.db_path)
-    _, llm, vision = _make_clients(cfg, need_llm=True, need_vision=True)
+    _, llm, vision = _make_clients(cfg, need_llm=True, need_vision=True, store=store)
     # 带上本地嵌入/重排模型（不存在时自动退化为关键词检索）
     embedder, reranker = build_local_models(cfg)
     service = AskService(cfg, store, llm, vision, embedder=embedder, reranker=reranker)
@@ -287,7 +291,7 @@ def cmd_ask(args, cfg) -> int:
 
 def cmd_notes(args, cfg) -> int:
     store = Store(cfg.db_path)
-    _, llm, _ = _make_clients(cfg, need_llm=True)
+    _, llm, _ = _make_clients(cfg, need_llm=True, store=store)
     video_id = _resolve_video_id(store, args.video)
     service = NotesService(cfg, store, llm)
 
@@ -484,6 +488,101 @@ def cmd_reocr(args, cfg) -> int:
     return 0
 
 
+def cmd_usage(args, cfg) -> int:
+    """查看用量账本；--backfill-asr 可回填已有课程的转写用量。"""
+    store = Store(cfg.db_path)
+    try:
+        if args.backfill_asr:
+            n = _backfill_asr_usage(store)
+            print(f"已回填 {n} 门课程的转写用量。")
+
+        data = store.usage_summary(args.video or None)
+    finally:
+        store.close()
+
+    if not data["calls"]:
+        print("账本为空。")
+        print("提示：记账只覆盖开启本功能之后的调用；已有课程的转写可用")
+        print("      `vedioai usage --backfill-asr` 回填（依据库里已有的转写时长）。")
+        return 0
+
+    def yuan(v: float) -> str:
+        return f"¥{v:.4f}" if v < 1 else f"¥{v:.2f}"
+
+    scope = f"课程 {args.video}" if args.video else "全库"
+    print("=" * 64)
+    print(f"{scope}用量：{data['calls']} 次调用，估算 {yuan(data['cost_yuan'])}")
+    if data["unpriced_calls"]:
+        print(
+            f"注意：其中 {data['unpriced_calls']} 次调用没有价目，未计入金额"
+            f"——实际花费高于上面这个数。"
+        )
+    print("=" * 64)
+    print(
+        f"输入 {data['prompt_tokens']:,} tokens"
+        f"（命中缓存 {data['cached_tokens']:,}）"
+        f"  输出 {data['completion_tokens']:,}"
+    )
+    if data["audio_ms"]:
+        print(f"音频 {data['audio_ms'] / 60000:.1f} 分钟")
+
+    print("\n按用途：")
+    for r in data["by_kind"]:
+        print(f"  {r['kind']:<10} {r['calls']:>4} 次   {yuan(r['cost'])}")
+
+    print("\n按模型：")
+    for r in data["by_model"]:
+        print(f"  {r['model']:<26} {r['calls']:>4} 次   {yuan(r['cost'])}")
+
+    if data["by_video"]:
+        print("\n按课程：")
+        for r in data["by_video"]:
+            title = (r["title"] or r["video_id"])[:28]
+            print(f"  {title:<30} {r['calls']:>4} 次   {yuan(r['cost'])}")
+
+    if data["by_day"]:
+        print("\n按天（近 30 天）：")
+        for r in data["by_day"]:
+            print(f"  {r['day']}  {r['calls']:>4} 次   {yuan(r['cost'])}")
+
+    print(f"\n当前计费时段：{'高峰（价格翻倍）' if ledger.is_peak() else '闲时'}")
+    print("金额为按官方价目估算，以控制台账单为准。")
+    return 0
+
+
+def _backfill_asr_usage(store: Store) -> int:
+    """给已有课程补记转写用量。
+
+    回填是**有据可依**的，不是编数字：库里存在转写句，说明转写确实跑过、
+    确实按音频时长被计过费；而时长就在 videos 表里。所以这不是凭空生成，
+    是把一个本来就发生过、只是当时没记的事实补上。
+
+    已经有 asr 记录（或根本没有转写）的课程会跳过，重复执行不会翻倍。
+    """
+    done = 0
+    for video in store.list_videos():
+        vid = video["video_id"]
+        if not video.get("duration_ms"):
+            continue
+        has_asr_row = any(
+            r["kind"] == "asr" for r in store.usage_summary(vid)["by_kind"]
+        )
+        if has_asr_row:
+            continue
+        # 有转写句 = ASR 真跑过；没有就是还没走到那一步，不该记
+        if not store.get_segments(vid):
+            continue
+        store.record_usage(
+            kind="asr",
+            model="volc.bigasr.auc_turbo",
+            video_id=vid,
+            audio_ms=video["duration_ms"],
+            cost_yuan=ledger.estimate_asr_cost(video["duration_ms"]),
+        )
+        done += 1
+    return done
+
+
 def cmd_adjudicate(args, cfg) -> int:
     """让文本模型依据上下文判定术语表里待确认的词。"""
     from .glossary import (
@@ -643,6 +742,15 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("purge", help="删除某课程的入库产物")
     p.add_argument("video")
     p.set_defaults(func=cmd_purge)
+
+    p = sub.add_parser("usage", help="查看用量账本（花了多少钱）")
+    p.add_argument("video", nargs="?", help="课程 ID；省略则看全库")
+    p.add_argument(
+        "--backfill-asr",
+        action="store_true",
+        help="给开启记账之前入库的课程补记转写用量（依据库里已有的转写时长，不会重复记）",
+    )
+    p.set_defaults(func=cmd_usage)
 
     p = sub.add_parser(
         "repair",

@@ -21,6 +21,7 @@ from pathlib import Path
 from .config import Config
 from .embedding import EmbedderLike
 from .glossary import Glossary, apply_to_segments
+from . import ledger
 from .ingest.asr_volc import VolcASRClient
 from .ingest.media import (
     build_proxy,
@@ -412,6 +413,10 @@ class IngestPipeline:
                     raise RuntimeError("未配置火山 ASR 凭证，无法转写")
                 segments = self._transcribe(audio_path, info.duration_ms, work_dir, report)
                 log.info("转写完成：%d 句", len(segments))
+                # 转写是唯一按音频时长计费的环节，记一笔账。
+                # 复用已有转写时**不记**（没有产生新费用），否则重跑会因为
+                # 记账而看起来越来越贵。
+                self._record_asr_usage(video_id, info.duration_ms)
 
             # 转写纠错：ASR 会把专有名词听错（讲师说 uiautomator，转写成
             # "URL to meta"）。错字会一路穿过切块、摘要、章节笔记，最后变成
@@ -525,6 +530,21 @@ class IngestPipeline:
             raise
 
     # ------------------------------------------------------------------ 内部
+
+    def _record_asr_usage(self, video_id: str, duration_ms: int) -> None:
+        """记一笔转写用量。
+
+        注意这与「花费」是两件事：记录的是**音频时长**这个事实，
+        cost 只是按标价估的值。官方给录音文件识别 20 小时免费额度，
+        额度内实际不扣钱——所以界面上这项要标明是估算。
+        """
+        self.store.record_usage(
+            kind="asr",
+            model="volc.bigasr.auc_turbo",
+            video_id=video_id,
+            audio_ms=duration_ms,
+            cost_yuan=ledger.estimate_asr_cost(duration_ms),
+        )
 
     def _transcribe(self, audio_path: Path, duration_ms: int, work_dir: Path, report):
         """决定「一次性提交」还是「切段提交再按偏移合并」。

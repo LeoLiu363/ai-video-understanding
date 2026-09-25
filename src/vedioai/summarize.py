@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 
 from .llm import prompts
 from .llm.client import LLMClient, LLMError
+from . import ledger
 from .schema import Chapter, Chunk, Video, ms_to_hms
 from .store import Store
 
@@ -93,10 +94,14 @@ def summarize_chunks(
     *,
     workers: int = 4,
     progress=None,
+    video_id: str = "",
 ) -> tuple[list[Concept], int]:
     """为每个语义块生成小标题、要点与术语。
 
     返回 (术语列表, 失败片段数)。
+
+    video_id 只用于记账归类。注意记账作用域必须设在 `work` 内部：这些调用跑在
+    线程池的工作线程里，而 contextvar 不跨线程传递——设在外层等于没设。
     """
     concepts: list[Concept] = []
     failures = 0
@@ -108,7 +113,8 @@ def summarize_chunks(
             {"role": "user", "content": f"{prompts.CHUNK_SUMMARY}\n\n---\n{body}"},
         ]
         try:
-            data, _ = client.chat_json(messages, max_tokens=CHUNK_SUMMARY_TOKENS)
+            with ledger.usage_scope("summarize", video_id):
+                data, _ = client.chat_json(messages, max_tokens=CHUNK_SUMMARY_TOKENS)
             data = _as_object(data, where=f"片段摘要 {chunk.chunk_id}")
         except LLMError as exc:
             log.warning("片段摘要失败 %s: %s", chunk.chunk_id, exc)
@@ -146,8 +152,12 @@ def summarize_chapters(
     *,
     workers: int = 4,
     progress=None,
+    video_id: str = "",
 ) -> int:
-    """为一章生成标题与摘要（输入是该章的片段要点，不是逐字稿）。返回失败章节数。"""
+    """为一章生成标题与摘要（输入是该章的片段要点，不是逐字稿）。返回失败章节数。
+
+    video_id 只用于记账归类，作用域同样设在 work 内部（线程池不传 contextvar）。
+    """
     by_id = {c.chunk_id: c for c in chunks}
     failures = 0
 
@@ -165,7 +175,8 @@ def summarize_chapters(
             {"role": "user", "content": f"{prompts.CHAPTER_SUMMARY}\n\n---\n{body}"},
         ]
         try:
-            data, _ = client.chat_json(messages, max_tokens=CHAPTER_SUMMARY_TOKENS)
+            with ledger.usage_scope("summarize", video_id):
+                data, _ = client.chat_json(messages, max_tokens=CHAPTER_SUMMARY_TOKENS)
             data = _as_object(data, where=f"章节摘要 {chapter.chapter_id}")
         except LLMError as exc:
             log.warning("章节摘要失败 %s: %s", chapter.chapter_id, exc)
@@ -210,7 +221,8 @@ def summarize_video(
     ]
     result = SummaryResult()
     try:
-        data, _ = client.chat_json(messages, max_tokens=VIDEO_SUMMARY_TOKENS)
+        with ledger.usage_scope("summarize", video.video_id):
+            data, _ = client.chat_json(messages, max_tokens=VIDEO_SUMMARY_TOKENS)
         data = _as_object(data, where="全课摘要")
     except LLMError as exc:
         # 关键：这一步失败**绝不能**让整次入库作废。
@@ -262,11 +274,15 @@ def build_summary_tree(
     """
     if progress:
         progress(0, 1, "生成片段要点")
-    chunk_concepts, failed_chunks = summarize_chunks(client, chunks, progress=progress)
+    chunk_concepts, failed_chunks = summarize_chunks(
+        client, chunks, progress=progress, video_id=video.video_id
+    )
 
     if progress:
         progress(0, 1, "生成章节摘要")
-    failed_chapters = summarize_chapters(client, chapters, chunks, progress=progress)
+    failed_chapters = summarize_chapters(
+        client, chapters, chunks, progress=progress, video_id=video.video_id
+    )
 
     if progress:
         progress(0, 1, "生成全课摘要")

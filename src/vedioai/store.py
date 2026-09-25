@@ -118,10 +118,29 @@ CREATE TABLE IF NOT EXISTS embeddings (
     vec      BLOB NOT NULL
 );
 
+-- 用量账本。每次 LLM 调用与每次转写都记一行。
+-- cost_yuan 允许为 NULL：表示「这个模型没有价目，算不出钱」。
+-- 必须与 0 区分开——0 是「免费」，NULL 是「不知道」，混起来总账就是错的。
+CREATE TABLE IF NOT EXISTS usage_log (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    at                TEXT NOT NULL DEFAULT (datetime('now')),
+    video_id          TEXT NOT NULL DEFAULT '',
+    kind              TEXT NOT NULL DEFAULT 'llm',   -- ask / notes / summarize / glossary / asr
+    model             TEXT NOT NULL DEFAULT '',
+    prompt_tokens     INTEGER NOT NULL DEFAULT 0,
+    cached_tokens     INTEGER NOT NULL DEFAULT 0,
+    completion_tokens INTEGER NOT NULL DEFAULT 0,
+    audio_ms          INTEGER NOT NULL DEFAULT 0,
+    cost_yuan         REAL,
+    peak              INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE INDEX IF NOT EXISTS idx_chunks_video  ON chunks(video_id, idx);
 CREATE INDEX IF NOT EXISTS idx_chapter_video ON chapters(video_id, idx);
 CREATE INDEX IF NOT EXISTS idx_slide_video   ON slides(video_id, idx);
 CREATE INDEX IF NOT EXISTS idx_seg_video     ON segments(video_id, idx);
+CREATE INDEX IF NOT EXISTS idx_usage_video   ON usage_log(video_id, at);
+CREATE INDEX IF NOT EXISTS idx_usage_at      ON usage_log(at);
 """
 
 
@@ -517,6 +536,132 @@ class Store:
             return []
         # FTS5 的 bm25() 越小越相关，转成越大越相关
         return [(r["chunk_id"], -float(r["score"])) for r in rows]
+
+    # ------------------------------------------------------------------ 用量账
+
+    def record_usage(
+        self,
+        *,
+        kind: str,
+        model: str = "",
+        video_id: str = "",
+        prompt_tokens: int = 0,
+        cached_tokens: int = 0,
+        completion_tokens: int = 0,
+        audio_ms: int = 0,
+        cost_yuan: float | None = None,
+        peak: bool = False,
+    ) -> None:
+        """记一笔用量。
+
+        **这个方法绝不抛异常**：记账是旁路，不能因为它失败而让一次已经付过费的
+        转写或一次已经拿到答案的问答前功尽弃。失败只丢一行账，并留下日志。
+        """
+        try:
+            self.conn.execute(
+                """
+                INSERT INTO usage_log (video_id, kind, model, prompt_tokens,
+                                       cached_tokens, completion_tokens, audio_ms,
+                                       cost_yuan, peak)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    video_id, kind, model, prompt_tokens, cached_tokens,
+                    completion_tokens, audio_ms, cost_yuan, 1 if peak else 0,
+                ),
+            )
+            self.conn.commit()
+        except sqlite3.Error as exc:  # 磁盘满 / 库锁 / 表被改坏
+            log.warning("用量记账失败（不影响主流程）：%s", exc)
+
+    def usage_summary(self, video_id: str | None = None) -> dict:
+        """汇总用量。video_id 省略 = 全库。
+
+        返回的 ``unpriced_calls`` 很关键：它表示有多少次调用没查不到价目，
+        也就是**总花费被低估了多少次**。界面必须把它显示出来，否则用户会
+        把「算出来的数」当成「真实的数」。
+        """
+        where, params = "", []
+        if video_id:
+            where, params = "WHERE video_id = ?", [video_id]
+
+        total = self.conn.execute(
+            f"""
+            SELECT COUNT(*) AS calls,
+                   COALESCE(SUM(prompt_tokens), 0)     AS prompt_tokens,
+                   COALESCE(SUM(cached_tokens), 0)     AS cached_tokens,
+                   COALESCE(SUM(completion_tokens), 0) AS completion_tokens,
+                   COALESCE(SUM(audio_ms), 0)          AS audio_ms,
+                   COALESCE(SUM(cost_yuan), 0)         AS cost,
+                   SUM(CASE WHEN cost_yuan IS NULL THEN 1 ELSE 0 END) AS unpriced
+            FROM usage_log {where}
+            """,
+            params,
+        ).fetchone()
+
+        def rows(sql: str) -> list[dict]:
+            return [dict(r) for r in self.conn.execute(sql, params).fetchall()]
+
+        by_kind = rows(
+            f"""
+            SELECT kind,
+                   COUNT(*) AS calls,
+                   COALESCE(SUM(prompt_tokens), 0)     AS prompt_tokens,
+                   COALESCE(SUM(cached_tokens), 0)     AS cached_tokens,
+                   COALESCE(SUM(completion_tokens), 0) AS completion_tokens,
+                   COALESCE(SUM(cost_yuan), 0)         AS cost
+            FROM usage_log {where}
+            GROUP BY kind ORDER BY cost DESC
+            """
+        )
+        by_model = rows(
+            f"""
+            SELECT model, kind, COUNT(*) AS calls,
+                   COALESCE(SUM(cost_yuan), 0) AS cost
+            FROM usage_log {where}
+            GROUP BY model, kind ORDER BY cost DESC
+            """
+        )
+        # 单课视图下不需要「按课程拆分」（只有一行），所以只在全库视图里算。
+        by_video: list[dict] = []
+        if not video_id:
+            by_video = [
+                dict(r)
+                for r in self.conn.execute(
+                    """
+                    SELECT u.video_id,
+                           COALESCE(v.title, u.video_id) AS title,
+                           COUNT(*) AS calls,
+                           COALESCE(SUM(u.cost_yuan), 0) AS cost
+                    FROM usage_log u
+                    LEFT JOIN videos v ON v.video_id = u.video_id
+                    GROUP BY u.video_id ORDER BY cost DESC
+                    """
+                ).fetchall()
+            ]
+        by_day = rows(
+            f"""
+            SELECT date(at, 'localtime') AS day, COUNT(*) AS calls,
+                   COALESCE(SUM(cost_yuan), 0) AS cost
+            FROM usage_log {where}
+            GROUP BY day ORDER BY day DESC LIMIT 30
+            """
+        )
+
+        return {
+            "video_id": video_id or "",
+            "calls": total["calls"],
+            "unpriced_calls": total["unpriced"] or 0,
+            "cost_yuan": round(total["cost"] or 0.0, 4),
+            "prompt_tokens": total["prompt_tokens"],
+            "cached_tokens": total["cached_tokens"],
+            "completion_tokens": total["completion_tokens"],
+            "audio_ms": total["audio_ms"],
+            "by_kind": by_kind,
+            "by_model": by_model,
+            "by_video": by_video,
+            "by_day": by_day,
+        }
 
     def close(self) -> None:
         self.conn.close()

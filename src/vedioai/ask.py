@@ -20,6 +20,7 @@ from pathlib import Path
 from .config import Config
 from .context import build_full_prefix, build_outline_prefix, estimate_tokens
 from .embedding import EmbedderLike, Reranker
+from . import ledger
 from .llm import prompts
 from .llm.client import LLMClient, Usage
 from .retrieve import Retriever
@@ -145,16 +146,19 @@ class AskService:
 
         images: list[str] = []
         reply = None
-        if intent == "visual" and self.vision is not None:
-            image_paths = self._evidence_images(video_id, hits)
-            if image_paths:
-                question_text = self._build_question(question, current_ms, within_chapter, None)
-                reply = self.vision.ask_with_images(full_prompt, question_text, image_paths)
-                images = [str(p) for p in image_paths]
+        # 标注「用途 + 课程」供记账归类。记账回调挂在客户端出口上，读的就是
+        # 这里设置的 contextvar（见 ledger.recorder）。
+        with ledger.usage_scope("ask", video_id):
+            if intent == "visual" and self.vision is not None:
+                image_paths = self._evidence_images(video_id, hits)
+                if image_paths:
+                    question_text = self._build_question(question, current_ms, within_chapter, None)
+                    reply = self.vision.ask_with_images(full_prompt, question_text, image_paths)
+                    images = [str(p) for p in image_paths]
 
-        if reply is None:
-            question_text = self._build_question(question, current_ms, within_chapter, hits)
-            reply = self.client.ask(full_prompt, question_text)
+            if reply is None:
+                question_text = self._build_question(question, current_ms, within_chapter, hits)
+                reply = self.client.ask(full_prompt, question_text)
 
         citations = self._build_citations(video_id, chapters, chunks, hits, reply.text)
         return Answer(
