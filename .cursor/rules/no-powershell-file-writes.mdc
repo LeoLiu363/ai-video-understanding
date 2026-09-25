@@ -1,0 +1,31 @@
+---
+description: 禁止用 PowerShell 写入/改写源文件（会以 GBK 编码 + BOM 破坏 UTF-8 中文）
+alwaysApply: true
+---
+
+# 禁止用 PowerShell 写入/改写源文件
+
+## 背景（本项目真实事故）
+2026-09-25，用 PowerShell 命令改写 `src/vedioai/ask.py` 与 `src/vedioai/pipeline.py`：
+
+- Windows PowerShell 5.1 的 `Set-Content` / `Out-File` / `>` / `>>` 默认按 **GBK(CP936)**
+  编码写盘，并可能追加 UTF-8 BOM；
+- 源文件内容是 UTF-8 中文，被按 GBK 解码后再写回，造成**不可逆**信息丢失
+  （例如 `。` 的字节 `E3 80 82` 中 `82` 不在映射表内，被替换成 `?`）；
+- 约 700 行代码当场损坏，只能靠对话记录重放 + 字节级反向映射才救回。
+
+## 强制规则
+1. **绝不用 PowerShell 写源文件**。禁止对文本源文件（`.py` / `.md` / `.yaml` / `.yml` /
+   `.json` / `.toml` / `.ts` / `.tsx` / `.html`）使用 `Set-Content`、`Out-File`、
+   `Add-Content`、`>`、`>>`、`-Encoding` 等相关写法。
+2. 改文件只用以下方式：
+   - 编辑器写文件工具、`StrReplace`（默认 UTF-8，最安全）；
+   - 或 Python 脚本：`Path.write_text(text, encoding="utf-8", newline="\n")`。
+3. 若必须在 shell 里生成文件，用 Python 而不是 PowerShell。
+4. `Get-Content` 只用于**查看**；不要把它的输出回写文件。
+5. 控制台中文乱码是 GBK 终端的显示问题，不代表文件损坏——判断文件是否损坏要看字节，
+   不要用 PowerShell 打印结果下结论。
+
+## 兜底
+本项目已启用 git。任何意外损坏都可用 `git diff` / `git checkout -- <file>` 找回。
+**改动前确保工作区干净或已提交**，不要在有未提交改动时做批量文件操作。
