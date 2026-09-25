@@ -786,6 +786,27 @@ def test_slide_config_ocrs_at_native_resolution_by_default():
     assert cfg.ocr_width == 0, "0 = 原始分辨率；OCR 默认绝不能缩图"
 
 
+def test_as_object_coerces_list_wrapped_response():
+    """模型把对象包进数组时不能崩。
+
+    真实事故：章节摘要那一步模型返回了 [...]，而 extract_json 为了稳健会同时
+    尝试 {...} 与 [...]，于是拿到 list。老代码直接 .get() 抛 AttributeError，
+    且发生在 chunks 已落库之后——一次可降级的失败被升级成整入库崩溃。
+    """
+    from vedioai.llm.client import LLMError
+    from vedioai.summarize import _as_object
+
+    assert _as_object({"title": "t"}, where="x") == {"title": "t"}
+    assert _as_object([{"title": "t"}], where="x") == {"title": "t"}
+    assert _as_object([1, "x", {"summary": "s"}], where="x") == {"summary": "s"}
+    with pytest.raises(LLMError):
+        _as_object([], where="x")
+    with pytest.raises(LLMError):
+        _as_object([1, 2], where="x")
+    with pytest.raises(LLMError):
+        _as_object("不是对象", where="x")
+
+
 def test_collect_context_separates_ground_truth_from_summaries(store: Store):
     """摘要（LLM 写的）不能进证据池，否则等于用幻觉校验幻觉。
 

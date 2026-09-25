@@ -206,6 +206,51 @@ def cfg(tmp_path: Path) -> Config:
 # ------------------------------------------------------------------- 测试
 
 
+def test_carry_over_summaries_survives_rebuild(cfg: Config, video_file: Path, monkeypatch):
+    """重建分段时必须把已有摘要搬过去，否则摘要生成一失败就是数据损失。
+
+    这是真实事故的回归护栏：流水线先 replace_chunks（新块摘要为空）再生成摘要，
+    一旦摘要那步抛错，库里就留下「摘要全空」的残局——旧摘要明明还在库里，
+    只是被「先删后建」带走了，而且是在转写已付过费之后。
+    """
+    from vedioai import pipeline as pipeline_mod
+
+    def fake_detect(ffmpeg, src, duration_ms, out_dir, slide_cfg, *, progress=None):
+        return []
+
+    monkeypatch.setattr(pipeline_mod, "detect_slides", fake_detect)
+
+    # 第一次入库：写入摘要
+    store = Store(cfg.db_path)
+    pipe = IngestPipeline(cfg, store, llm=None, asr=StubASR())
+    video = pipe.run(video_file, skip_summary=True)
+    vid = video.video_id
+
+    for chunk in store.get_chunks(vid):
+        store.update_chunk_summary(vid, chunk.chunk_id, "旧标题", "旧摘要内容")
+
+    before = {c.chunk_id: c.summary for c in store.get_chunks(vid)}
+    assert any(before.values()), "前置条件：应该已经有摘要了"
+    store.close()
+
+    # 第二次入库（复用转写与课件），摘要生成故意全部失败。
+    # 这里必须给一个非 None 的 llm——流水线只在 llm 非空时才走摘要分支，
+    # 给 None 就绕过了要测的那条路径（踩过这个坑：断言 DID NOT RAISE）。
+    store = Store(cfg.db_path)
+    pipe = IngestPipeline(cfg, store, llm=object(), asr=StubASR())
+
+    def boom(*a, **kw):
+        raise RuntimeError("模拟摘要生成失败")
+
+    monkeypatch.setattr(pipeline_mod, "build_summary_tree", boom)
+    with pytest.raises(RuntimeError):
+        pipe.run(video_file, reuse_slides=True)
+
+    after = {c.chunk_id: c.summary for c in store.get_chunks(vid)}
+    assert after == before, "摘要生成失败不该把已有摘要清空"
+    store.close()
+
+
 def test_full_ingest_produces_structured_ir(cfg: Config, video_file: Path):
     store = Store(cfg.db_path)
     pipeline = IngestPipeline(cfg, store, llm=None, asr=StubASR())

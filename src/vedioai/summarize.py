@@ -58,6 +58,27 @@ def _truncate(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[:limit] + "…"
 
 
+def _as_object(data, *, where: str) -> dict:
+    """把模型返回规整成 dict。
+
+    为什么需要：``extract_json`` 为了稳健会同时尝试 ``{...}`` 和 ``[...]``，
+    于是当模型把对象包在数组里（``[{"title": ...}]``）时返回的是 list。
+    直接 ``.get()`` 会抛 AttributeError——而它发生在 chunks 已经落库之后，
+    会把一次能降级的失败升级成整次入库崩溃，还顺手带走已有摘要。
+
+    这里只把「第一层是 list 就取第一个 dict」收敛掉，不做任何猜测性补字段；
+    实在拿不到 dict 就抛 LLMError，交给调用方**既有的降级路径**处理
+    （片段/章节/全课摘要都已捕获 LLMError 并只降级、不抛出）。
+    """
+    if isinstance(data, dict):
+        return data
+    if isinstance(data, list):
+        for item in data:
+            if isinstance(item, dict):
+                return item
+    raise LLMError(f"{where} 的返回不是 JSON 对象：{str(data)[:200]}")
+
+
 # 结构化抽取的 token 预算。这些是大批量的高频调用（一门课几十次），
 # 给够即可，不要抠。配合 chat_json 的「截断自动翻倍重试」，不会再出现
 # 因为思考吃光预算而返回空内容的情况。
@@ -88,6 +109,7 @@ def summarize_chunks(
         ]
         try:
             data, _ = client.chat_json(messages, max_tokens=CHUNK_SUMMARY_TOKENS)
+            data = _as_object(data, where=f"片段摘要 {chunk.chunk_id}")
         except LLMError as exc:
             log.warning("片段摘要失败 %s: %s", chunk.chunk_id, exc)
             return chunk, [], False
@@ -144,6 +166,7 @@ def summarize_chapters(
         ]
         try:
             data, _ = client.chat_json(messages, max_tokens=CHAPTER_SUMMARY_TOKENS)
+            data = _as_object(data, where=f"章节摘要 {chapter.chapter_id}")
         except LLMError as exc:
             log.warning("章节摘要失败 %s: %s", chapter.chapter_id, exc)
             return False
@@ -188,6 +211,7 @@ def summarize_video(
     result = SummaryResult()
     try:
         data, _ = client.chat_json(messages, max_tokens=VIDEO_SUMMARY_TOKENS)
+        data = _as_object(data, where="全课摘要")
     except LLMError as exc:
         # 关键：这一步失败**绝不能**让整次入库作废。
         # 转写、课件、分段、索引都已经是有效成果，其中转写还已经付过费。

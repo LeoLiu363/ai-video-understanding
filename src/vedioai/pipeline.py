@@ -33,7 +33,7 @@ from .ingest.media import (
 from .ingest.segment import attach_parents, build_chapters, build_chunks
 from .ingest.slides import detect_slides, reocr_slides
 from .llm.client import LLMClient
-from .schema import Segment, Video, VideoStatus
+from .schema import Chapter, Chunk, Segment, Video, VideoStatus
 from .store import Store
 from .summarize import build_summary_tree
 
@@ -292,6 +292,42 @@ class IngestPipeline:
         # 术语表在构造时载入：纠错要在转写落库前生效，晚加载就晚了
         self.glossary = Glossary.load(cfg.glossary_path)
 
+    def _carry_over_summaries(
+        self,
+        video_id: str,
+        chunks: list[Chunk],
+        chapters: list[Chapter],
+    ) -> None:
+        """把库里已有的标题/摘要搬到新构建的块与章节上。
+
+        存在的理由：分段重建是「先删后建」，而摘要生成紧随其后。若摘要这一步
+        失败（LLM 返回格式异常、网络中断、额度用尽），库里留下的就是
+        「摘要全空」的残局——一次本可降级的失败被升级成了数据损失。
+
+        为什么按 id 搬运是安全的：``chunk_id`` 由序号决定
+        （``{video_id}-c{idx:04d}``），而块边界只取决于转写文本。
+        只要转写没变（复用路径下必然如此），新旧块就一一对应；
+        章节同理（``{video_id}-h{idx:04d}``）。搬运后若摘要重新生成成功会覆盖，
+        失败则原地保留旧值——两种结局都不会比原来更差。
+        """
+        old_chunks = {c.chunk_id: c for c in self.store.get_chunks(video_id)}
+        for chunk in chunks:
+            old = old_chunks.get(chunk.chunk_id)
+            if old is None:
+                continue
+            # 只在旧块正文没变时搬运：正文变了说明分段口径变了，旧摘要已过期
+            if old.text == chunk.text:
+                chunk.title = chunk.title or old.title
+                chunk.summary = chunk.summary or old.summary
+
+        old_chapters = {c.chapter_id: c for c in self.store.get_chapters(video_id)}
+        for chapter in chapters:
+            old = old_chapters.get(chapter.chapter_id)
+            if old is None:
+                continue
+            chapter.title = chapter.title or old.title
+            chapter.summary = chapter.summary or old.summary
+
     def run(
         self,
         video_path: Path,
@@ -429,6 +465,14 @@ class IngestPipeline:
             chunks = build_chunks(video_id, segments, slides)
             chapters = build_chapters(video_id, chunks)
             attach_parents(chunks, chapters)
+            # 复用旧摘要：chunk_id 由「序号」决定（{video_id}-cNNNN），而块的边界
+            # 只取决于转写，所以只要转写没变，新旧块就是一一对应的。
+            #
+            # 为什么必须复用：接下来这一步是**先删后建**——如果没有摘要就落库，
+            # 而摘要生成中途失败（LLM 返回格式异常、网络中断、额度用尽），
+            # 库里就会留下「摘要全空」的残局。旧行为把一次可降级的失败
+            # 升级成了数据损失。带过来之后，生成成功会覆盖，失败则原地保留。
+            self._carry_over_summaries(video_id, chunks, chapters)
             self.store.replace_chunks(video_id, chunks)
             self.store.replace_chapters(video_id, chapters)
             log.info("分段：%d 块，%d 章", len(chunks), len(chapters))
