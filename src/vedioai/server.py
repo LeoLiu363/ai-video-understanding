@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import mimetypes
 import re
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
@@ -93,6 +94,10 @@ def create_app(cfg: Config | None = None) -> FastAPI:
     def library() -> dict:
         items = []
         for v in store.list_videos():
+            # 列表接口不带 video_summary：那是一份 4500 字左右的摘要，
+            # 列表 UI 一个字都用不到（只用标题/时长/章数/状态）。以前每门课都
+            # 白传一遍，课程一多就是纯浪费。
+            v.pop("video_summary", None)
             items.append(
                 {
                     **v,
@@ -102,7 +107,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         return {"items": items}
 
     @app.get("/api/library/{video_id}")
-    def library_item(video_id: str) -> dict:
+    def library_item(video_id: str, with_ocr: bool = False) -> dict:
         video = store.get_video(video_id)
         if video is None:
             raise HTTPException(404, "课程不存在")
@@ -129,7 +134,9 @@ def create_app(cfg: Config | None = None) -> FastAPI:
                     "idx": s.idx,
                     "start_ms": s.start_ms,
                     "label": ms_to_hms(s.start_ms),
-                    "ocr_text": s.ocr_text,
+                    # 课件 OCR 占了整个响应的 90%（实测 222KB 里的 162KB），
+                    # 而界面点开课程时并不用它。默认不发，需要时显式加 ?with_ocr=1。
+                    "ocr_text": (s.ocr_text if with_ocr else ""),
                 }
                 for s in store.get_slides(video_id)
             ],
@@ -235,6 +242,41 @@ def create_app(cfg: Config | None = None) -> FastAPI:
 
         job = jobs.submit("notes", video_id, work)
         return {"job_id": job.job_id}
+
+    @app.get("/api/notes/{video_id}")
+    def notes_document(video_id: str) -> dict:
+        """读取磁盘上已生成的学习文档。
+
+        以前只有 POST（生成），没有 GET（读取），于是界面只能显示「本次会话刚
+        生成、还在内存里」的那一份——服务一重启就再也看不到已有的 notes.md。
+        这个接口让界面直接读文件，生成与阅读解耦。
+        """
+        video = store.get_video(video_id)
+        if video is None:
+            raise HTTPException(404, "课程不存在")
+
+        out_dir = Path(cfg.library_dir) / video_id
+        notes_path = out_dir / "notes.md"
+        if not notes_path.exists():
+            return {"exists": False, "markdown": "", "concepts": "", "meta": {}}
+
+        markdown = notes_path.read_text(encoding="utf-8")
+        st = notes_path.stat()
+        concepts_path = out_dir / "concepts.md"
+        return {
+            "exists": True,
+            "markdown": markdown,
+            "concepts": (
+                concepts_path.read_text(encoding="utf-8") if concepts_path.exists() else ""
+            ),
+            "meta": {
+                "chars": len(markdown),
+                "mtime": datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M"),
+                # 生成失败时 NotesService 不会覆盖良品，会留一份 .bak；
+                # 一并告知界面，用户才知道手上这份是不是被保留的旧版。
+                "has_backup": (out_dir / "notes.md.bak").exists(),
+            },
+        }
 
     # ------------------------------------------------------------------ 媒体
 

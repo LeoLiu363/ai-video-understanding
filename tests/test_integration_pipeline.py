@@ -402,6 +402,96 @@ def test_http_server_endpoints(cfg: Config, video_file: Path):
         assert bad.status_code == 400
 
 
+def test_http_reads_notes_document_from_disk(cfg: Config, video_file: Path):
+    """界面必须读得到磁盘上的 notes.md。
+
+    以前只有 POST /api/notes（生成）而没有 GET（读取），于是界面只能显示
+    「本次会话刚生成、还留在内存里」的那一份——服务一重启，已经生成好的
+    长篇学习文档就从界面上消失了。文档是产物，不该依赖进程生命周期。
+    """
+    from fastapi.testclient import TestClient
+
+    from vedioai.server import create_app
+
+    store = Store(cfg.db_path)
+    vid = IngestPipeline(cfg, store, llm=None, asr=StubASR()).run(
+        video_file, skip_summary=True
+    ).video_id
+    store.close()
+
+    app = create_app(cfg)
+    with TestClient(app) as client:
+        # 还没生成过：返回 exists=False 而不是 404，界面才能区分
+        # 「这门课没有文档」与「课程不存在」两种状态。
+        r = client.get(f"/api/notes/{vid}")
+        assert r.status_code == 200
+        assert r.json()["exists"] is False
+
+        out_dir = Path(cfg.library_dir) / vid
+        out_dir.mkdir(parents=True, exist_ok=True)
+        doc = "# 标题\n\n| 章 | 时间 |\n|---|---|\n| 甲 | 00:05 |\n"
+        (out_dir / "notes.md").write_text(doc, encoding="utf-8")
+        (out_dir / "concepts.md").write_text("术语表内容", encoding="utf-8")
+
+        d = client.get(f"/api/notes/{vid}").json()
+        assert d["exists"] is True
+        assert "00:05" in d["markdown"]
+        assert d["concepts"] == "术语表内容"
+        # chars 是界面显示「多少字」的依据，必须与实际内容一致
+        assert d["meta"]["chars"] == len(doc)
+        assert d["meta"]["mtime"]
+
+        assert client.get("/api/notes/不存在的课程").status_code == 404
+
+
+def test_library_payload_drops_fields_the_ui_never_reads(
+    cfg: Config, video_file: Path, monkeypatch
+):
+    """列表与详情别再白传界面用不到的重字段。
+
+    实测这门课：详情响应 222KB 里 162KB（89.5%）是 slides[].ocr_text，而界面
+    点开课程时从不读 slides；列表则每门课都捎带一份 4500 字的 video_summary。
+    课程一多，这些就是纯浪费的带宽与解析开销。
+    """
+    from fastapi.testclient import TestClient
+
+    from vedioai.server import create_app
+
+    cfg.slides = SlideConfig(enabled=True, sample_interval_ms=5000, ocr_enabled=True)
+    marker = "NATIVE BASE64 AES 课件文字"
+
+    def make_slides(Slide, src):
+        return [
+            Slide(
+                idx=0, start_ms=0, end_ms=5000,
+                image_path=str(src), ocr_text=marker, phash="0",
+            )
+        ]
+
+    _counting_detect(monkeypatch, make_slides)
+    store = Store(cfg.db_path)
+    IngestPipeline(cfg, store, llm=None, asr=StubASR()).run(video_file, skip_summary=True)
+    vid = video_id_of(store)
+    store.set_video_summary(vid, "摘要正文\n\n大纲：\n- 甲章：讲甲\n")
+    store.close()
+
+    app = create_app(cfg)
+    with TestClient(app) as client:
+        item = client.get("/api/library").json()["items"][0]
+        assert "video_summary" not in item, "列表不需要整篇摘要，界面只用标题/时长/章数"
+        assert item["duration_label"]
+
+        plain = client.get(f"/api/library/{vid}").json()
+        assert plain["slides"], "课件帧的元信息（idx/时间）仍要保留，界面用它定位"
+        assert all(s["ocr_text"] == "" for s in plain["slides"]), (
+            "默认不该发课件 OCR 全文"
+        )
+
+        # 需要时显式索取，能力不能丢
+        full = client.get(f"/api/library/{vid}", params={"with_ocr": True}).json()
+        assert any(marker in s["ocr_text"] for s in full["slides"])
+
+
 def test_scaffold_generates_40_slots(cfg: Config, video_file: Path, tmp_path: Path):
     from evals.run_eval import scaffold
 

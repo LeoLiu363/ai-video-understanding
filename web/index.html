@@ -119,6 +119,78 @@
   .tabs button.on { background: var(--accent); color: #06101f; border-color: var(--accent); font-weight: 600; }
   .hint { color: var(--muted); font-size: 12px; }
   .hidden { display: none !important; }
+
+  /* ------------------------------------------------ 渲染后的 Markdown */
+  .md { font-size: 14px; }
+  .md > *:first-child { margin-top: 0; }
+  .md h1 { font-size: 22px; margin: 20px 0 10px; }
+  .md h2 { font-size: 18px; margin: 22px 0 10px; padding-bottom: 6px; border-bottom: 1px solid var(--line); }
+  .md h3 { font-size: 15px; margin: 16px 0 8px; color: #cdd6e4; }
+  .md h4, .md h5, .md h6 { font-size: 14px; margin: 12px 0 6px; color: var(--muted); }
+  .md p { margin: 8px 0; }
+  .md ul, .md ol { margin: 8px 0; padding-left: 22px; }
+  .md li { margin: 3px 0; }
+  .md hr { border: none; border-top: 1px solid var(--line); margin: 18px 0; }
+  .md blockquote {
+    margin: 8px 0; padding: 4px 0 4px 12px; border-left: 3px solid var(--line);
+    color: var(--muted);
+  }
+  .md code { background: #0b0e13; padding: 1px 5px; border-radius: 4px; font-size: 12.5px; }
+  .md pre {
+    background: #0b0e13; padding: 10px 12px; border-radius: 8px; overflow-x: auto;
+    border: 1px solid var(--line);
+  }
+  .md pre code { background: none; padding: 0; }
+  .md a { color: var(--accent); }
+  .md-table-wrap { overflow-x: auto; margin: 12px 0; border: 1px solid var(--line); border-radius: 8px; }
+  .md table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  .md th, .md td { border-bottom: 1px solid var(--line); padding: 7px 10px; text-align: left; vertical-align: top; }
+  .md th { background: var(--panel-2); font-weight: 600; white-space: nowrap; }
+  .md tr:last-child td { border-bottom: none; }
+  .md td { min-width: 60px; }
+  .md strong { color: #fff; }
+
+  /* 时间标注：`> 时间 00:55` 与表格里的整格时间 */
+  .ts-chip {
+    display: inline-block; padding: 1px 9px; border-radius: 999px;
+    background: #1b2434; border: 1px solid #2c3b55; color: var(--accent);
+    font-size: 12px; font-variant-numeric: tabular-nums; cursor: pointer;
+  }
+  .ts-chip:hover { border-color: var(--accent); color: #7eaaff; }
+
+  /* ------------------------------------------------ 全屏阅读视图 */
+  .reader {
+    position: fixed; inset: 0; z-index: 50; background: var(--bg);
+    display: grid; grid-template-rows: auto 1fr;
+  }
+  .reader-head {
+    display: flex; align-items: center; gap: 10px; padding: 10px 16px;
+    border-bottom: 1px solid var(--line); background: var(--panel);
+  }
+  .reader-head h2 { font-size: 15px; margin: 0; font-weight: 600; }
+  .reader-body {
+    display: grid; grid-template-columns: 280px minmax(0, 1fr);
+    min-height: 0;
+  }
+  .reader-toc {
+    overflow-y: auto; border-right: 1px solid var(--line);
+    padding: 10px 6px 40px; background: var(--panel);
+  }
+  .reader-toc .grp {
+    font-size: 11px; letter-spacing: .8px; text-transform: uppercase;
+    color: var(--muted); padding: 10px 10px 4px;
+  }
+  .reader-toc a {
+    display: block; padding: 5px 10px; border-radius: 6px; color: var(--text);
+    text-decoration: none; font-size: 12.5px; line-height: 1.4;
+    border-left: 2px solid transparent;
+  }
+  .reader-toc a.sub { padding-left: 22px; color: var(--muted); font-size: 12px; }
+  .reader-toc a:hover { background: var(--panel-2); }
+  .reader-toc a.on { background: #1b2434; border-left-color: var(--accent); color: #fff; }
+  .reader-content { overflow-y: auto; padding: 26px 40px 120px; }
+  .reader-content .inner { max-width: 900px; margin: 0 auto; }
+  .reader-empty { max-width: 560px; margin: 60px auto; text-align: center; }
 </style>
 </head>
 <body>
@@ -195,25 +267,41 @@
       <div id="panel-notes" class="hidden">
         <p class="hint">按章节分层生成学习笔记（Markdown），每节带时间锚点。</p>
         <button class="primary" id="btn-notes">生成学习文档</button>
+        <div class="row" style="margin-top:10px">
+          <button class="primary hidden" id="btn-read">全屏阅读</button>
+        </div>
         <div id="notes-progress" class="hidden" style="margin-top:10px">
           <div class="progress"><i id="notes-bar"></i></div>
           <div class="status-line" id="notes-status"></div>
         </div>
+        <p class="hint" id="notes-empty" style="margin-top:10px"></p>
         <div id="notes-out" class="notes-out hidden" style="margin-top:10px"></div>
-        <div class="row" style="margin-top:8px">
-          <button class="ghost hidden" id="btn-download">下载 Markdown</button>
-        </div>
       </div>
     </div>
   </section>
 </main>
+
+<!-- ------------------------------------------------------------ 阅读视图 -->
+<div id="reader" class="reader hidden">
+  <div class="reader-head">
+    <h2 id="reader-title">学习文档</h2>
+    <span class="hint" id="reader-meta"></span>
+    <span class="spacer" style="flex:1"></span>
+    <button class="ghost" id="reader-regen">重新生成</button>
+    <button class="ghost" id="reader-download">下载 Markdown</button>
+    <button class="primary" id="reader-close">回到播放器</button>
+  </div>
+  <div class="reader-body">
+    <nav class="reader-toc" id="reader-toc"></nav>
+    <div class="reader-content" id="reader-content"></div>
+  </div>
+</div>
 
 <script>
 const $ = (id) => document.getElementById(id);
 let current = null;       // 当前课程的详情
 let currentId = null;
 let pollTimer = null;
-let notesMarkdown = "";
 
 /* ---------------------------------------------------------------- 工具 */
 
@@ -237,19 +325,161 @@ function esc(s) {
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
-/** 极简 Markdown 渲染：标题、列表、粗体、代码块、行内代码。 */
-function md(text) {
-  let out = esc(text);
-  out = out.replace(/```([\s\S]*?)```/g, (_, code) => `<pre>${code.trim()}</pre>`);
-  out = out.replace(/`([^`\n]+)`/g, "<code>$1</code>");
-  out = out.replace(/^###\s+(.*)$/gm, "<strong>$1</strong>");
-  out = out.replace(/^##\s+(.*)$/gm, "<strong>$1</strong>");
-  out = out.replace(/^#\s+(.*)$/gm, "<strong>$1</strong>");
-  out = out.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
-  return out;
+/** Markdown 渲染：标题层级、表格、列表、引用、分隔线、代码块、行内格式。
+ *
+ * 旧实现只把 `#`/`##`/`###` 统统换成 <strong>，于是 23 章文档变成一整块粗体，
+ * 468 行表格显示成裸 `|`。笔记这种东西，结构就是内容，不能糊。
+ *
+ * 顺序很重要：先摘出代码块（免得其中的 `|`、`#` 被当成语法），再按行扫描块级
+ * 元素，最后统一处理行内格式。
+ */
+const TS_RE = /\b(\d{1,3}):([0-5]\d)\b/;
+
+function mdInline(s) {
+  return esc(s)
+    .replace(/`([^`\n]+)`/g, "<code>$1</code>")
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>")
+    .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g,
+      '<a href="$2" target="_blank" rel="noopener">$1</a>');
 }
 
-/** 把正文里的 [MM:SS] / [时间 MM:SS] 变成可点击的时间戳。 */
+/** 整格就是一个时间（`| 00:55 |`）时渲染成可点的时间胶囊。 */
+function tsChip(text) {
+  const m = /^\s*(\d{1,3}):([0-5]\d)\s*$/.exec(text);
+  if (!m) return null;
+  const ms = (Number(m[1]) * 60 + Number(m[2])) * 1000;
+  return `<span class="ts-chip ts-link" data-ms="${ms}">${m[1].padStart(2, "0")}:${m[2]}</span>`;
+}
+
+function renderMarkdown(src) {
+  const lines = String(src ?? "").replace(/\r\n?/g, "\n").split("\n");
+  const out = [];
+  let i = 0;
+
+  const splitRow = (row) =>
+    row.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((c) => c.trim());
+
+  while (i < lines.length) {
+    const line = lines[i];
+
+    // 围栏代码块
+    if (/^\s*```/.test(line)) {
+      const lang = line.trim().slice(3).trim();
+      const body = [];
+      i++;
+      while (i < lines.length && !/^\s*```/.test(lines[i])) body.push(lines[i++]);
+      i++; // 收尾 ```
+      out.push(
+        `<pre><code${lang ? ` class="lang-${esc(lang)}"` : ""}>${esc(body.join("\n"))}</code></pre>`
+      );
+      continue;
+    }
+
+    // 表格：当前行是 |...|，下一行是 |---|---|
+    if (/^\s*\|/.test(line) && /^\s*\|[\s:|-]+\|\s*$/.test(lines[i + 1] || "")) {
+      const head = splitRow(line);
+      i += 2;
+      const rows = [];
+      while (i < lines.length && /^\s*\|/.test(lines[i])) rows.push(splitRow(lines[i++]));
+      const th = head.map((c) => `<th>${mdInline(c)}</th>`).join("");
+      const tb = rows
+        .map(
+          (r) =>
+            `<tr>${head
+              .map((_, n) => {
+                const cell = r[n] ?? "";
+                return `<td>${tsChip(cell) ?? mdInline(cell)}</td>`;
+              })
+              .join("")}</tr>`
+        )
+        .join("");
+      out.push(`<div class="md-table-wrap"><table><thead><tr>${th}</tr></thead><tbody>${tb}</tbody></table></div>`);
+      continue;
+    }
+
+    // 分隔线
+    if (/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(line)) {
+      out.push("<hr>");
+      i++;
+      continue;
+    }
+
+    // 标题
+    const h = /^(#{1,6})\s+(.*)$/.exec(line);
+    if (h) {
+      const lvl = h[1].length;
+      out.push(`<h${lvl}>${mdInline(h[2].trim())}</h${lvl}>`);
+      i++;
+      continue;
+    }
+
+    // 引用：`> 时间 00:55` 特判成时间胶囊（这是笔记里 114 处跳转锚点）
+    if (/^\s*>\s?/.test(line)) {
+      const buf = [];
+      while (i < lines.length && /^\s*>\s?/.test(lines[i])) {
+        buf.push(lines[i].replace(/^\s*>\s?/, ""));
+        i++;
+      }
+      const text = buf.join(" ").trim();
+      const m = /^时间\s*(.+)$/.exec(text);
+      if (m && TS_RE.test(m[1])) {
+        out.push(
+          m[1]
+            .split(/[、,，\s]+/)
+            .filter(Boolean)
+            .map((t) => {
+              const t2 = /^(\d{1,3}):([0-5]\d)$/.exec(t);
+              if (!t2) return mdInline(t);
+              const ms = (Number(t2[1]) * 60 + Number(t2[2])) * 1000;
+              return `<div><span class="ts-chip ts-link" data-ms="${ms}">${t2[1].padStart(2, "0")}:${t2[2]}</span></div>`;
+            })
+            .join("")
+        );
+      } else {
+        out.push(`<blockquote>${mdInline(text)}</blockquote>`);
+      }
+      continue;
+    }
+
+    // 列表
+    if (/^\s*[-*+]\s+/.test(line) || /^\s*\d+[.)]\s+/.test(line)) {
+      const ordered = /^\s*\d+[.)]\s+/.test(line);
+      const items = [];
+      while (
+        i < lines.length &&
+        (/^\s*[-*+]\s+/.test(lines[i]) || /^\s*\d+[.)]\s+/.test(lines[i]))
+      ) {
+        items.push(lines[i].replace(/^\s*(?:[-*+]|\d+[.)])\s+/, ""));
+        i++;
+      }
+      const tag = ordered ? "ol" : "ul";
+      out.push(`<${tag}>${items.map((t) => `<li>${mdInline(t)}</li>`).join("")}</${tag}>`);
+      continue;
+    }
+
+    // 空行
+    if (!line.trim()) {
+      i++;
+      continue;
+    }
+
+    // 段落（合并到空行或下一个块级起点）
+    const para = [];
+    while (
+      i < lines.length &&
+      lines[i].trim() &&
+      !/^\s*(#{1,6}\s|>|```|\||[-*+]\s|\d+[.)]\s)/.test(lines[i]) &&
+      !/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(lines[i])
+    ) {
+      para.push(lines[i++]);
+    }
+    out.push(`<p>${mdInline(para.join(" "))}</p>`);
+  }
+  return out.join("\n");
+}
+
+/** 兜底：正文里的 [MM:SS] / [时间 MM:SS] 也变成可点时间戳。 */
 function linkifyTimestamps(html) {
   return html.replace(/\[(?:时间\s*)?(\d{1,2}:\d{2}(?::\d{2})?)\]/g, (m, ts) => {
     const parts = ts.split(":").map(Number);
@@ -257,6 +487,11 @@ function linkifyTimestamps(html) {
     const ms = ((parts[0] * 60 + parts[1]) * 60 + parts[2]) * 1000;
     return `<span class="ts-link" data-ms="${ms}">[${ts}]</span>`;
   });
+}
+
+/** 一次到位：渲染 + 时间戳可点。 */
+function md(text) {
+  return linkifyTimestamps(renderMarkdown(text));
 }
 
 async function api(path, opts) {
@@ -334,8 +569,7 @@ async function openVideo(id) {
     });
   }
   $("chat").innerHTML = "";
-  $("notes-out").classList.add("hidden");
-  $("btn-download").classList.add("hidden");
+  await loadNotes(id);
   loadLibrary();
 }
 
@@ -383,10 +617,17 @@ function pollJob(jobId, kind) {
         const vid = job.result.video_id;
         if (vid) await openVideo(vid);
       } else {
-        notesMarkdown = job.result.markdown || "";
-        $("notes-out").textContent = notesMarkdown;
-        $("notes-out").classList.remove("hidden");
-        $("btn-download").classList.remove("hidden");
+        // 生成完不直接用返回值渲染，而是回磁盘读一遍：
+        // 这样面板显示的永远是文件真实内容（含 NotesService 在失败时
+        // 保留旧文档的情况），而不是「本次调用以为写出了什么」。
+        // 用 job.video_id 而不是 currentId：用户可能在生成期间切了课程。
+        const vid = job.video_id || currentId;
+        if (vid === currentId) {
+          await loadNotes(vid);
+          if (notesDoc?.exists) openReader();
+        } else {
+          flash(`「${$("video-title").textContent}」的文档已生成`);
+        }
       }
     } else if (job.status === "failed") {
       clearInterval(pollTimer);
@@ -437,9 +678,17 @@ async function ask() {
         <span class="txt">${esc(c.text.slice(0, 90))}…</span>
       </div>`).join("");
 
-    const thumbs = (ans.images || []).map((src, i) =>
-      `<img src="/api/slides/${currentId}/${c.slide_idx ?? ""}" data-src="${esc(src)}" alt="课件 ${i + 1}">`
-    ).join("");
+    // 引用自带的课件图：接口字段是 slide_idxs（数组），旧代码写的 c.slide_idx
+    // 根本不存在，拼出来的 URL 少了索引 → 实测 404，缩略图一直是坏的。
+    const thumbs = (ans.citations || [])
+      .filter((c) => (c.slide_idxs || []).length)
+      .slice(0, 4)
+      .map((c) => {
+        const idx = c.slide_idxs[0];
+        return `<img src="/api/slides/${currentId}/${idx}" alt="课件 ${idx}"
+          data-ms="${c.start_ms}" data-idx="${idx}" title="课件第 ${idx + 1} 帧 · 点击放大">`;
+      })
+      .join("");
 
     const u = ans.usage || {};
     const meta = `意图 ${ans.intent} · 前缀约 ${ans.prefix_tokens} tokens` +
@@ -465,11 +714,144 @@ async function ask() {
 
 /* ---------------------------------------------------------------- 文档 */
 
+let notesDoc = null;   // { exists, markdown, concepts, meta }
+
+async function loadNotes(videoId) {
+  try {
+    notesDoc = await api(`/api/notes/${videoId}`);
+  } catch (e) {
+    notesDoc = { exists: false, markdown: "", meta: {} };
+  }
+  renderNotesPanel();
+  return notesDoc;
+}
+
+/** 侧栏「学习文档」面板：只放入口与状态，正文交给全屏阅读视图。 */
+function renderNotesPanel() {
+  const out = $("notes-out");
+  const hint = $("notes-empty");
+  const openBtn = $("btn-read");
+  if (!notesDoc || !notesDoc.exists) {
+    out.classList.add("hidden");
+    hint.classList.remove("hidden");
+    hint.textContent = currentId
+      ? "这门课还没有学习文档。点上面「生成学习文档」开始（约 2 分钟）。"
+      : "请先选择一门课程。";
+    openBtn.classList.add("hidden");
+    return;
+  }
+  hint.classList.add("hidden");
+  openBtn.classList.remove("hidden");
+  const m = notesDoc.meta || {};
+  out.classList.remove("hidden");
+  out.textContent =
+    `已生成 · ${(m.chars || 0).toLocaleString()} 字 · 更新于 ${m.mtime || "?"}` +
+    (m.has_backup ? "\n（磁盘上还留有一份上一版 notes.md.bak）" : "");
+}
+
+async function openReader() {
+  if (!notesDoc?.exists) return;
+  $("reader-title").textContent = current?.video?.title || "学习文档";
+  const m = notesDoc.meta || {};
+  $("reader-meta").textContent = `${(m.chars || 0).toLocaleString()} 字 · 更新于 ${m.mtime || "?"}`;
+
+  const html = md(notesDoc.markdown);
+  const content = $("reader-content");
+  content.innerHTML = `<div class="inner md">${html}</div>`;
+  // 先显示再建目录：容器还 display:none 时挂 IntersectionObserver，
+  // 滚动高亮要等元素可见才首次触发，容易一闪或干脆不亮。
+  $("reader").classList.remove("hidden");
+  buildToc();
+  content.scrollTop = 0;
+}
+
+/** 从 h2/h3 生成目录。h2 是章，h3 是小节。 */
+function buildToc() {
+  const inner = $("reader-content").querySelector(".inner");
+  const toc = $("reader-toc");
+  if (!inner) return;
+
+  const heads = [...inner.querySelectorAll("h1, h2, h3")];
+  const parts = ['<div class="grp">目录</div>'];
+  const seen = {};
+  heads.forEach((el, n) => {
+    const id = `sec-${n}`;
+    el.id = id;
+    const level = el.tagName === "H3" ? 2 : 1;
+    // 同名标题去重，避免 23 章里多个「本章要点」互相覆盖
+    const base = el.textContent.trim().slice(0, 40);
+    const text = seen[base] ? `${base} (${++seen[base]})` : ((seen[base] = 1), base);
+    parts.push(
+      `<a href="#${id}" data-target="${id}" class="${level === 2 ? "sub" : ""}">${esc(text)}</a>`
+    );
+  });
+  toc.innerHTML = parts.join("");
+
+  toc.querySelectorAll("a").forEach((a) => {
+    a.onclick = (e) => {
+      e.preventDefault();
+      const target = document.getElementById(a.dataset.target);
+      if (target) target.scrollIntoView({ behavior: "smooth", block: "start" });
+    };
+  });
+  spyHeadings(heads);
+}
+
+/** 滚动时高亮当前所在章节。 */
+let spyObserver = null;
+function spyHeadings(heads) {
+  if (spyObserver) spyObserver.disconnect();
+  const toc = $("reader-toc");
+  const links = new Map(
+    [...toc.querySelectorAll("a")].map((a) => [a.dataset.target, a])
+  );
+  spyObserver = new IntersectionObserver(
+    (entries) => {
+      entries.forEach((en) => {
+        if (!en.isIntersecting) return;
+        links.forEach((a) => a.classList.remove("on"));
+        const a = links.get(en.target.id);
+        if (a) {
+          a.classList.add("on");
+          a.scrollIntoView({ block: "nearest" });
+        }
+      });
+    },
+    { root: $("reader-content"), rootMargin: "0px 0px -75% 0px", threshold: 0 }
+  );
+  heads.forEach((h) => spyObserver.observe(h));
+}
+
+function closeReader() {
+  $("reader").classList.add("hidden");
+  if (spyObserver) spyObserver.disconnect();
+}
+
+let flashTimer = null;
+function flash(msg) {
+  let el = $("flash");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "flash";
+    el.style.cssText =
+      "position:fixed;left:50%;bottom:28px;transform:translateX(-50%);z-index:99;" +
+      "background:#1b2434;border:1px solid #2c3b55;color:#e6e9ef;padding:7px 16px;" +
+      "border-radius:999px;font-size:13px;pointer-events:none;transition:opacity .3s";
+    document.body.appendChild(el);
+  }
+  el.textContent = msg;
+  el.style.opacity = "1";
+  clearTimeout(flashTimer);
+  flashTimer = setTimeout(() => (el.style.opacity = "0"), 1600);
+}
+
 async function generateNotes() {
   if (!currentId) { alert("请先选择一门课程"); return; }
   const btn = $("btn-notes");
   btn.disabled = true;
   $("notes-out").classList.add("hidden");
+  $("notes-empty").classList.remove("hidden");
+  $("notes-empty").textContent = "生成中…";
   try {
     const job = await api("/api/notes", {
       method: "POST",
@@ -477,7 +859,7 @@ async function generateNotes() {
     });
     pollJob(job.job_id, "notes");
   } catch (e) {
-    $("notes-status").textContent = e.message;
+    $("notes-empty").textContent = e.message;
     $("notes-progress").classList.remove("hidden");
   } finally {
     btn.disabled = false;
@@ -490,6 +872,13 @@ $("btn-ingest").onclick = startIngest;
 $("btn-refresh").onclick = loadLibrary;
 $("btn-ask").onclick = ask;
 $("btn-notes").onclick = generateNotes;
+$("btn-read").onclick = openReader;
+$("reader-close").onclick = closeReader;
+$("reader-regen").onclick = () => {
+  closeReader();
+  $("tab-notes").onclick();
+  generateNotes();
+};
 $("ingest-path").addEventListener("keydown", (e) => { if (e.key === "Enter") startIngest(); });
 $("question").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) ask();
@@ -504,21 +893,38 @@ $("tab-notes").onclick = () => {
   $("panel-notes").classList.remove("hidden"); $("panel-ask").classList.add("hidden");
 };
 
-$("btn-download").onclick = () => {
-  const blob = new Blob([notesMarkdown], { type: "text/markdown;charset=utf-8" });
+/** 下载当前 notes.md。 */
+function downloadNotes() {
+  if (!notesDoc?.exists) return;
+  const blob = new Blob([notesDoc.markdown], { type: "text/markdown;charset=utf-8" });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
   a.download = `${(current?.video?.title || "notes")}.md`;
   a.click();
   URL.revokeObjectURL(a.href);
-};
+}
+$("reader-download").onclick = downloadNotes;
 
-// 点击任意时间戳跳转
+// 点击任意时间戳（正文 / 胶囊 / 引用）跳转
 document.addEventListener("click", (e) => {
-  const el = e.target.closest(".ts-link");
-  if (el && el.dataset.ms) seek(Number(el.dataset.ms));
+  const el = e.target.closest(".ts-link, .ts-chip");
+  if (el && el.dataset.ms) {
+    const ms = Number(el.dataset.ms);
+    // 阅读视图盖住了播放器，点时间戳先关掉它，否则画面被挡住看不见跳转
+    if (!$("reader").classList.contains("hidden")) closeReader();
+    seek(ms);
+    flash(`已跳到 ${fmt(ms)}`);
+    return;
+  }
   const th = e.target.closest(".thumbs img");
-  if (th && th.dataset.src) window.open(th.dataset.src, "_blank");
+  if (th) {
+    // 用服务端接口打开原图；以前 window.open 的是本地文件路径，浏览器打不开
+    window.open(`/api/slides/${currentId}/${th.dataset.idx}`, "_blank");
+  }
+});
+
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !$("reader").classList.contains("hidden")) closeReader();
 });
 
 // 播放时间显示
