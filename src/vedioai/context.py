@@ -93,18 +93,34 @@ def build_full_prefix(
     #
     # 改成把前缀的剩余空间按需分配给各块课件文字（_waterfill）：转写一个字不砍，
     # 课件文字在总长上限内尽量保住。这样前缀总长仍守 max_chars。
-    ocr_sizes = [len(c.ocr_text or "") for c in chunks]
-    fixed_len = sum(
-        len(f"\n【{ms_to_hms(c.start_ms)}】") + len(c.text) for c in chunks
-    )
-    overhead = sum(len(p) + 1 for p in parts) + len("\n## 逐字稿\n")
-    ocr_limits = _waterfill(ocr_sizes, max(0, max_chars - overhead - fixed_len))
+    #
+    # 关键细节：尺寸必须按**压缩后**的长度算，不能按原始长度。
+    # _compact 会把换行换成 " / "（1 字符 → 3 字符）再按同一个 limit 截断，
+    # 所以「按原始长度分配、按压缩长度执行」必然每块都超限、尾巴被默默砍掉。
+    # 实测这一处让「4，反编译工具字符串搜素」这类位于块尾的内容消失，
+    # 而分配器自己还报告「没有块被截断」——出错时不自知，最难查。
+    compacted = [_compact(c.ocr_text, 10**9) if c.ocr_text else "" for c in chunks]
+    ocr_sizes = [len(t) for t in compacted]
+
+    # 预算要把每一项都算进去：元信息、章节、逐字稿骨架、每块课件前的「（课件）」
+    # 标记，以及 join 时每个元素之间的换行。
+    base = sum(len(p) for p in parts) + len("\n## 逐字稿\n")
+    per_chunk_fixed = sum(len(f"\n【{ms_to_hms(c.start_ms)}】") + len(c.text) for c in chunks)
+    ocr_markers = 4 * sum(1 for t in compacted if t)  # "（课件）"
+    n_parts = len(parts) + 1 + sum(2 + (1 if t else 0) for t in compacted)
+    join_sep = max(0, n_parts - 1)
+
+    budget = max(0, max_chars - base - per_chunk_fixed - ocr_markers - join_sep)
+    ocr_limits = _waterfill(ocr_sizes, budget)
 
     parts.append("\n## 逐字稿")
-    for chunk, ocr_limit in zip(chunks, ocr_limits):
+    for chunk, body, ocr_limit in zip(chunks, compacted, ocr_limits):
         parts.append(f"\n【{ms_to_hms(chunk.start_ms)}】")
-        if chunk.ocr_text and ocr_limit > 0:
-            parts.append(f"（课件）{_compact(chunk.ocr_text, ocr_limit)}")
+        if body and ocr_limit > 0:
+            # 省略号也要占位：否则每截断一块就多出 1 字符，累加起来突破上限，
+            # 触发末尾兜底截断——那会把最后几块整段砍掉，正是要避免的事。
+            shown = body if len(body) <= ocr_limit else body[: max(0, ocr_limit - 1)] + "…"
+            parts.append(f"（课件）{shown}")
         parts.append(chunk.text)
 
     text = "\n".join(parts)

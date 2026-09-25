@@ -1034,6 +1034,68 @@ def test_eval_run_marked_invalid_when_most_questions_error():
     assert report.index("本次运行无效") < report.index("## 总览"), "警示必须在报告最顶部"
 
 
+def test_prefix_keeps_tail_of_multiline_slide_text():
+    """多行课件文字不能丢掉尾部。
+
+    真实事故：预算按**原始长度**（换行算 1 字符）分配，而 _compact 会先把换行换成
+    " / "（1→3 字符）再按同一个 limit 截断。于是每块必然超限、尾巴被默默砍掉，
+    可分配器还报告「没有块被截断」——出错时不自知。实测让「4，反编译工具字符串搜素」
+    这类块尾内容消失，而它正是某道评估题的答案。
+    """
+    from vedioai.context import build_full_prefix
+    from vedioai.schema import Chunk, Video, VideoStatus
+
+    video = Video(
+        video_id="v1", path="x.mp4", title="t", duration_ms=60_000, status=VideoStatus.READY
+    )
+    tail_marker = "4，反编译工具字符串搜素"
+    # 行数要够多：换行越多，压缩后比原始长出的部分越多，旧实现丢得越狠
+    lines = [f"第{i}行内容" for i in range(60)] + [tail_marker]
+    chunks = [
+        Chunk(
+            chunk_id="v1-c0000",
+            idx=0,
+            start_ms=0,
+            end_ms=10_000,
+            text="正文",
+            ocr_text="\n".join(lines),
+        )
+    ]
+
+    # 先按超大上限建一次，得到「完整展开后」的真实长度
+    full = build_full_prefix(video, [], chunks, max_chars=10**9)
+    assert tail_marker in full
+
+    # 上限刚好等于完整长度：此时一个字符都不该丢
+    prefix = build_full_prefix(video, [], chunks, max_chars=len(full) + 10)
+    assert tail_marker in prefix, "上限够用时，多行课件的最后一行必须完整保留"
+    assert len(prefix) <= len(full) + 10, "不得突破上限"
+
+
+def test_prefix_never_exceeds_max_chars_with_many_chunks():
+    """块数多、每块都很长时，也必须守住上限（省略号占位也要算）。"""
+    from vedioai.context import build_full_prefix
+    from vedioai.schema import Chunk, Video, VideoStatus
+
+    video = Video(
+        video_id="v1", path="x.mp4", title="t", duration_ms=600_000, status=VideoStatus.READY
+    )
+    chunks = [
+        Chunk(
+            chunk_id=f"v1-c{i:04d}",
+            idx=i,
+            start_ms=i * 1000,
+            end_ms=i * 1000 + 1000,
+            text="正文" * 50,
+            ocr_text="\n".join(f"第{j}行课件文字" for j in range(40)),
+        )
+        for i in range(30)
+    ]
+    for limit in (5_000, 20_000, 60_000):
+        prefix = build_full_prefix(video, [], chunks, max_chars=limit)
+        assert len(prefix) <= limit, f"max_chars={limit} 被突破：{len(prefix)}"
+
+
 def test_collect_context_separates_ground_truth_from_summaries(store: Store):
     """摘要（LLM 写的）不能进证据池，否则等于用幻觉校验幻觉。
 
