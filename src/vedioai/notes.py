@@ -233,19 +233,60 @@ class NotesService:
     # --------------------------------------------------------------- 组装辅助
 
     @staticmethod
+    def _fit(text: str, room: int) -> str:
+        """把 text 削到 room 字以内；削了就留痕。room<=0 返回空串。"""
+        if room <= 0:
+            return ""
+        if len(text) <= room:
+            return text
+        if room == 1:
+            return "…"
+        return text[: room - 1] + "…"
+
+    @staticmethod
     def _chapter_transcript(chunks: list[Chunk]) -> str:
+        """拼一章的转写，上限 CHAPTER_CHAR_BUDGET。
+
+        超限时的取舍顺序很重要：**先削课件文字，再削转写**。转写是证据本身，
+        课件文字只是辅助。旧实现是整块 `break`，于是「刚好把预算撑破」的那一块
+        连转写一起消失——笔记里看不出少了老师的一段原话，属于静默数据丢失。
+        """
         parts: list[str] = []
         total = 0
+        truncated = False
         for chunk in sorted(chunks, key=lambda c: c.start_ms):
-            head = f"\n【{ms_to_hms(chunk.start_ms)}】"
-            if chunk.ocr_text:
-                head += f"\n（课件）{chunk.ocr_text}"
-            body = f"{head}\n{chunk.text}"
-            total += len(body)
-            if total > CHAPTER_CHAR_BUDGET:
-                parts.append("\n（本章内容过长，已截断）")
+            remaining = CHAPTER_CHAR_BUDGET - total
+            if remaining <= 0:
+                truncated = True
                 break
-            parts.append(body)
+
+            head = f"\n【{ms_to_hms(chunk.start_ms)}】"
+            tail = f"\n{chunk.text}"
+            ocr = chunk.ocr_text or ""
+
+            # 先给转写留位置，剩下的才轮到课件文字
+            body_tail = NotesService._fit(tail, max(0, remaining - len(head)))
+            if len(body_tail) < len(tail):
+                truncated = True
+
+            ocr_room = remaining - len(head) - len(body_tail) - len("\n（课件）")
+            if ocr and ocr_room > 0:
+                body_ocr = NotesService._fit(ocr, ocr_room)
+                if len(body_ocr) < len(ocr):
+                    truncated = True
+                ocr_part = f"\n（课件）{body_ocr}"
+            else:
+                ocr_part = ""
+                if ocr:
+                    truncated = True
+
+            parts.append(head + ocr_part + body_tail)
+            total += len(head) + len(ocr_part) + len(body_tail)
+            if len(body_tail) < len(tail):
+                break
+
+        if truncated:
+            parts.append("\n（本章内容过长，已截断）")
         return "\n".join(parts)
 
     @staticmethod

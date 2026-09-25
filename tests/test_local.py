@@ -1096,6 +1096,52 @@ def test_prefix_never_exceeds_max_chars_with_many_chunks():
         assert len(prefix) <= limit, f"max_chars={limit} 被突破：{len(prefix)}"
 
 
+def test_chapter_transcript_keeps_speech_when_slide_text_overflows():
+    """课件文字太长时，只能削课件，不能把这一块的转写一起丢掉。
+
+    旧实现是整块 `break`：刚好把预算撑破的那一块连转写一起消失，笔记里看不出
+    少了老师的一段原话——静默数据丢失。
+    """
+    from vedioai.notes import CHAPTER_CHAR_BUDGET, NotesService
+    from vedioai.schema import Chunk
+
+    chunks = [
+        Chunk(chunk_id="c1", idx=0, start_ms=0, end_ms=1000, text="开头", ocr_text=""),
+        Chunk(
+            chunk_id="c2",
+            idx=1,
+            start_ms=1000,
+            end_ms=2000,
+            text="老师原话：这里必须开权限",
+            ocr_text="课件文字" * 20_000,  # 远超单章预算
+        ),
+    ]
+    out = NotesService._chapter_transcript(chunks)
+    assert "老师原话：这里必须开权限" in out, "转写必须保住"
+    assert "本章内容过长" in out, "削了就要留痕"
+    assert len(out) <= CHAPTER_CHAR_BUDGET + 40, f"仍应守住预算：{len(out)}"
+
+
+def test_chapter_transcript_no_false_truncation_notice():
+    """内容放得下时不得出现「已截断」——假告警会让模型以为材料缺失。"""
+    from vedioai.notes import NotesService
+    from vedioai.schema import Chunk
+
+    chunks = [
+        Chunk(
+            chunk_id="c1",
+            idx=0,
+            start_ms=0,
+            end_ms=1000,
+            text="正文",
+            ocr_text="课件\n第二行",
+        )
+    ]
+    out = NotesService._chapter_transcript(chunks)
+    assert "已截断" not in out
+    assert "课件" in out and "第二行" in out and "正文" in out
+
+
 def test_collect_context_separates_ground_truth_from_summaries(store: Store):
     """摘要（LLM 写的）不能进证据池，否则等于用幻觉校验幻觉。
 
