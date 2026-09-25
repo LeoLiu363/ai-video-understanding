@@ -16,6 +16,44 @@ from __future__ import annotations
 from .schema import Chapter, Chunk, Video, ms_to_hms
 
 
+def _waterfill(sizes: list[int], budget: int) -> list[int]:
+    """把 ``budget`` 按需分配给 ``sizes``，返回每一项的上限（注水法）。
+
+    为什么不是简单均分：均分会让小项浪费配额、大项照样被截。做法是逐轮抬高
+    「水位」——当前水位之下的项按需求足额满足，剩下的预算再由还在挨截的项平分。
+    对长度差异很大的项（本课课件文字从几十字到一万多字都有），这能显著提高
+    实际保留量。
+
+    正确性要求：``sum(result) <= budget``。这一点必须守住，否则前缀会突破
+    max_chars。所以每轮都要从 remaining 里真实扣减，不能只看「谁还没满」。
+
+    必须是确定性的：前缀要逐字节稳定才能命中上下文缓存，所以这里不能有任何
+    随机或依赖输入顺序之外的东西。
+    """
+    n = len(sizes)
+    if n == 0 or budget <= 0:
+        return [0] * n
+    limits = [0] * n
+    remaining = budget
+    active = list(range(n))
+    while active:
+        share = remaining // len(active)
+        if share <= 0:
+            break
+        below = [i for i in active if sizes[i] <= share]
+        if not below:
+            # 没人能在当前水位被满足，就把水位定在这里、预算分完
+            for i in active:
+                limits[i] = share
+            break
+        for i in below:
+            limits[i] = sizes[i]
+            remaining -= sizes[i]
+        below_set = set(below)
+        active = [i for i in active if i not in below_set]
+    return limits
+
+
 def build_full_prefix(
     video: Video,
     chapters: list[Chapter],
@@ -45,16 +83,34 @@ def build_full_prefix(
                 head += f"：{ch.summary.strip()}"
             parts.append(head)
 
+    # ---------------------------------------------------------- 逐字稿
+    #
+    # 课件文字（OCR）不能按固定字数截断。高清 OCR 之后每块课件可达数千字，
+    # 固定上限会把绝大部分内容砍掉——实测本课 169893 字只剩 21169 字（丢 88%），
+    # 而答案常常就在被砍掉的那段里（讲师在属性窗口里填的路径、某个控件的
+    # resource-id），表现是模型答「材料中没有提到」。这类失败比答错更难发现：
+    # 它听起来像「课程没讲」，用户不会去怀疑。
+    #
+    # 改成把前缀的剩余空间按需分配给各块课件文字（_waterfill）：转写一个字不砍，
+    # 课件文字在总长上限内尽量保住。这样前缀总长仍守 max_chars。
+    ocr_sizes = [len(c.ocr_text or "") for c in chunks]
+    fixed_len = sum(
+        len(f"\n【{ms_to_hms(c.start_ms)}】") + len(c.text) for c in chunks
+    )
+    overhead = sum(len(p) + 1 for p in parts) + len("\n## 逐字稿\n")
+    ocr_limits = _waterfill(ocr_sizes, max(0, max_chars - overhead - fixed_len))
+
     parts.append("\n## 逐字稿")
-    for chunk in chunks:
+    for chunk, ocr_limit in zip(chunks, ocr_limits):
         parts.append(f"\n【{ms_to_hms(chunk.start_ms)}】")
-        if chunk.ocr_text:
-            parts.append(f"（课件）{_compact(chunk.ocr_text)}")
+        if chunk.ocr_text and ocr_limit > 0:
+            parts.append(f"（课件）{_compact(chunk.ocr_text, ocr_limit)}")
         parts.append(chunk.text)
 
     text = "\n".join(parts)
     if len(text) > max_chars:
-        # 极端长的课程才截断，且明确告知模型，避免它以为材料完整
+        # 兜底。上面的分配已经按 max_chars 算过，正常不该走到这里；
+        # 真走到了也明确告知模型，避免它以为材料完整。
         text = text[:max_chars] + "\n\n（材料过长已截断）"
     return text
 

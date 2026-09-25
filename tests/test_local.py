@@ -807,6 +807,89 @@ def test_as_object_coerces_list_wrapped_response():
         _as_object("不是对象", where="x")
 
 
+def test_waterfill_never_exceeds_budget():
+    """注水法必须守住 sum(上限) <= budget。
+
+    这条不是形式主义：前缀总长上限就靠它兑现。早期实现只统计「谁还没满」而
+    不从剩余预算里扣减，算例 ([10,10,100], budget=60) 会放出 120 —— 超一倍，
+    前缀直接突破 max_chars，而且没人会发现。
+    """
+    from vedioai.context import _waterfill
+
+    cases = [
+        ([10, 10, 100], 60),
+        ([10, 10, 100], 500),
+        ([0, 5], 100),
+        ([1, 2, 3], 0),
+        ([5, 5, 5], 4),
+        ([100, 200, 300], 90),
+    ]
+    for sizes, budget in cases:
+        limits = _waterfill(sizes, budget)
+        assert sum(limits) <= budget, f"{sizes} budget={budget} 超预算：{limits}"
+        assert all(l <= s for l, s in zip(limits, sizes)), "上限不该超过需求"
+
+    # 预算足够时应当足额满足，不做无谓截断
+    assert _waterfill([10, 10, 100], 500) == [10, 10, 100]
+
+
+def test_prefix_keeps_slide_text_instead_of_cutting_at_400_chars():
+    """课件文字不能被固定 400 字上限砍掉。
+
+    真实事故：高清 OCR 后每块课件从百余字涨到数千字（本课中位 2637、最大 11843），
+    而前缀仍按 400 字/块截断——169893 字只剩 21169 字，丢 88%。答案往往就在被
+    砍掉的那段里（属性窗口里填的路径、某个控件的 resource-id），表现是模型答
+    「材料中没有提到」。这种失败比答错更难发现：听起来像「课程没讲」。
+    """
+    from vedioai.context import build_full_prefix
+    from vedioai.schema import Chapter, Chunk, Video, VideoStatus
+
+    video = Video(
+        video_id="v1", path="x.mp4", title="t", duration_ms=600_000, status=VideoStatus.READY
+    )
+    # 一块超长课件文字，答案藏在第 1500 字附近（远超旧的 400 字上限）
+    filler = "界面元素 " * 300  # 1500 字
+    needle = "F:\\studioSdk\\tools\\bin"
+    long_ocr = filler + needle + " 属性窗口 起始位置"
+    chunks = [
+        Chunk(
+            chunk_id="v1-c0000",
+            idx=0,
+            start_ms=0,
+            end_ms=10_000,
+            text="讲师打开属性窗口查看起始位置",
+            ocr_text=long_ocr,
+        )
+    ]
+    chapters = [
+        Chapter(
+            chapter_id="v1-h0", idx=0, start_ms=0, end_ms=10_000, title="t", summary="s", chunk_ids=["v1-c0000"]
+        )
+    ]
+
+    prefix = build_full_prefix(video, chapters, chunks, max_chars=200_000)
+    assert needle in prefix, "超出 400 字的课件内容也必须进前缀"
+    assert len(prefix) <= 200_000, "前缀仍须守住总长上限"
+
+
+def test_prefix_truncates_when_course_is_too_long():
+    """总长不够时必须按上限收手，且明确告知模型材料被截断。"""
+    from vedioai.context import build_full_prefix
+    from vedioai.schema import Chunk, Video, VideoStatus
+
+    video = Video(
+        video_id="v1", path="x.mp4", title="t", duration_ms=600_000, status=VideoStatus.READY
+    )
+    chunks = [
+        Chunk(chunk_id=f"v1-c{i:04d}", idx=i, start_ms=i * 1000, end_ms=i * 1000 + 1000,
+              text="正文" * 500, ocr_text="课件" * 2000)
+        for i in range(20)
+    ]
+    prefix = build_full_prefix(video, [], chunks, max_chars=20_000)
+    assert len(prefix) <= 20_000 + 20, "不得突破上限（留出截断提示的余量）"
+    assert "已截断" in prefix, "截断必须告知模型，否则它会以为材料完整"
+
+
 def test_collect_context_separates_ground_truth_from_summaries(store: Store):
     """摘要（LLM 写的）不能进证据池，否则等于用幻觉校验幻觉。
 
