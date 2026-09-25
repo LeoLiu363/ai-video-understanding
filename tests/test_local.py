@@ -22,12 +22,12 @@ from evals.run_eval import normalize, score_citation, score_keypoints  # noqa: E
 from vedioai.context import build_full_prefix, build_outline_prefix, estimate_tokens  # noqa: E402
 from vedioai.ingest.media import MediaInfo, StreamInfo, pick_split_points, plan_proxy  # noqa: E402
 from vedioai.ingest.segment import attach_parents, build_chapters, build_chunks  # noqa: E402
-from vedioai.config import Config, RetrieveConfig  # noqa: E402
+from vedioai.config import Config, RetrieveConfig, SlideConfig  # noqa: E402
 from vedioai.embedding import explain_ollama_failure  # noqa: E402
 from vedioai.glossary import Glossary, render_findings  # noqa: E402
 from vedioai.selfcheck import check_embedding  # noqa: E402
 from vedioai.retrieve import Retriever  # noqa: E402
-from vedioai.schema import Segment, Slide, Video, VideoStatus, hms_to_ms, ms_to_hms  # noqa: E402
+from vedioai.schema import Chapter, Segment, Slide, Video, VideoStatus, hms_to_ms, ms_to_hms  # noqa: E402
 from vedioai.store import Store, query_terms, tokenize_zh  # noqa: E402
 
 
@@ -771,4 +771,195 @@ def test_project_glossary_is_loadable_and_catches_real_case():
     assert "URL to meta" not in fixed
     assert "uiautomator" in fixed
     assert sum(f.count for f in fixes) == 1
+
+
+# ---------------------------------------------------------------- 课件 OCR 分辨率
+# 背景：早期版本把代表帧压到 960 宽再喂 OCR，把 "uiautomatorviewer.bat" 读成
+# "uiautomatoniewer.bet"、"BASE+MD5" 读成 "BASE+MDS"、"录制设置" 读成 "爱制设置"。
+# 实测同一帧只改喂图分辨率（960 → 1924），命中率从 58%/77% 提到 92%/100%，
+# 而 OCR 耗时只涨 2~16%。下面几条就是钉住「别再把 OCR 的图缩掉」。
+
+
+def test_slide_config_ocrs_at_native_resolution_by_default():
+    cfg = SlideConfig()
+    assert cfg.detect_width == 960, "变化检测那一遍要便宜，960 够用"
+    assert cfg.ocr_width == 0, "0 = 原始分辨率；OCR 默认绝不能缩图"
+
+
+def test_collect_context_separates_ground_truth_from_summaries(store: Store):
+    """摘要（LLM 写的）不能进证据池，否则等于用幻觉校验幻觉。
+
+    真实事故：转写里的错字 "D Y L two meter" 被上一轮 LLM 在摘要里
+    「合理化」成了 "Dalvik Debug Monitor"。若摘要能当证据，模型只要引用
+    这句幻觉就能拿到「依据已核实」的章，循环论证被包装成证据。
+    """
+    from vedioai.glossary import collect_context
+
+    vid = "v1"
+    term = "D Y L two meter"
+    store.upsert_video(
+        Video(video_id=vid, path="x.mp4", title="t", duration_ms=60000, status=VideoStatus.READY)
+    )
+    store.replace_segments(
+        vid, [Segment(idx=0, start_ms=0, end_ms=1000, text=f"它用的是一个 {term} 工具类")]
+    )
+    store.replace_slides(
+        vid,
+        [Slide(idx=0, start_ms=0, end_ms=2000, image_path="a.jpg", ocr_text=f"画面写着 {term}")],
+    )
+    store.replace_chunks(
+        vid,
+        [
+            make_chunk(
+                vid, 0, 0, 2000, "转写正文",
+                ocr="课件里写着 " + term,
+                slide_idxs=[0],
+            )
+        ],
+    )
+    # 摘要里是 LLM 自己「合理化」出来的另一个词——绝不能当证据。
+    # 尾部加一段独有内容，避免与转写片段因尾部相同而被去重掉。
+    summary_marker = "第二章摘要独有尾注"
+    store.replace_chapters(
+        vid,
+        [
+            Chapter(
+                chapter_id="v1-h0",
+                idx=0,
+                start_ms=0,
+                end_ms=2000,
+                title="t",
+                summary=f"{term} 就是上课时说的词。" + summary_marker * 4,
+                chunk_ids=[],
+            )
+        ],
+    )
+
+    contexts, ground_truth = collect_context(store, vid, term)
+    assert contexts, "应该收集到上下文"
+    assert any("章节摘要" in c for c in contexts), "摘要仍可作为线索展示给模型"
+    assert any(summary_marker in c for c in contexts), "带独有尾注的摘要条目不应被去重吞掉"
+
+    truth_blob = "\n".join(ground_truth)
+    assert "它用的是一个" in truth_blob, "原始转写属于一手材料"
+    assert "课件里写着" in truth_blob or "画面写着" in truth_blob, "画面 OCR 属于一手材料"
+    # 关键：只有 LLM 摘要里才有的内容，绝不能进证据池
+    assert summary_marker not in truth_blob, "摘要不能当证据，否则等于用幻觉校验幻觉"
+
+
+def test_extract_frame_native_omits_scale_filter(monkeypatch, tmp_path):
+    """width=None 必须不带 scale 滤镜——缩图正是 OCR 读错小字的根因。"""
+    from vedioai.ingest import media
+
+    calls: list[list[str]] = []
+    monkeypatch.setattr(media, "_run", lambda cmd: calls.append(list(cmd)))
+
+    media.extract_frame("ffmpeg", tmp_path / "in.mp4", tmp_path / "a.jpg", 1000)
+    media.extract_frame("ffmpeg", tmp_path / "in.mp4", tmp_path / "b.jpg", 1000, width=None)
+    media.extract_frame("ffmpeg", tmp_path / "in.mp4", tmp_path / "c.jpg", 1000, width=1280)
+
+    assert "scale=960:-2" in calls[0], "默认仍按 960 抽（预览/缩略图用）"
+    assert not any("scale" in part for part in calls[1]), "原生分辨率不该带 scale"
+    assert "scale=1280:-2" in calls[2]
+    assert all("-q:v" in cmd for cmd in calls), "文字细笔画对 JPEG 压缩敏感，质量要给足"
+
+
+def test_slide_detection_and_ocr_use_separate_widths(monkeypatch, tmp_path):
+    """变化检测用 detect_width，但 OCR 那张必须按 ocr_width（0=原生）来抽。"""
+    from vedioai.ingest import slides as S
+
+    frames = [
+        S._Frame(
+            ms=0,
+            path=tmp_path / "f_000001.jpg",
+            gray=np.zeros((36, 64), np.float32),
+            phash="0" * 16,
+        ),
+        S._Frame(
+            ms=2000,
+            path=tmp_path / "f_000002.jpg",
+            gray=np.full((36, 64), 255.0, np.float32),
+            phash="f" * 16,
+        ),
+    ]
+    sample_widths: list[int] = []
+    monkeypatch.setattr(
+        S, "extract_frames", lambda *a, **kw: (sample_widths.append(kw["width"]), frames)[1]
+    )
+
+    ocr_widths: list[object] = []
+    ocr_paths: list[Path] = []
+
+    def fake_extract(ffmpeg, src, dst, at_ms, width=960, **kw):
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_bytes(b"x")
+        ocr_widths.append(width)
+        return dst
+
+    monkeypatch.setattr(S, "extract_frame", fake_extract)
+    monkeypatch.setattr(S, "_get_ocr", lambda: object())
+    monkeypatch.setattr(
+        S, "_ocr_image", lambda ocr, path: (ocr_paths.append(path), "课件文字")[1]
+    )
+
+    cfg = SlideConfig(detect_width=640, ocr_width=0, sample_interval_ms=2000)
+    got = S.detect_slides("ffmpeg", tmp_path / "v.mp4", 4000, tmp_path / "out", cfg)
+
+    assert sample_widths == [640], "变化检测必须用 detect_width"
+    assert len(got) == 2, "灰度过半的相邻帧应判为换页"
+    assert ocr_widths == [None, None], "ocr_width=0 表示原始分辨率，不能缩图"
+    assert len(ocr_paths) == 2, "OCR 要读高清帧，不是采样帧"
+    assert all(str(p).endswith(".jpg") for p in ocr_paths)
+    assert all(s.ocr_text == "课件文字" for s in got)
+
+
+def test_ocr_disabled_keeps_cheap_sample_frame(monkeypatch, tmp_path):
+    """不做 OCR 时不该白抽高清帧，直接留采样小图。"""
+    from vedioai.ingest import slides as S
+
+    frame = S._Frame(
+        ms=0, path=tmp_path / "f_000001.jpg", gray=np.zeros((36, 64), np.float32), phash="0" * 16
+    )
+    monkeypatch.setattr(S, "extract_frames", lambda *a, **kw: [frame])
+    monkeypatch.setattr(S, "extract_frame", lambda *a, **kw: pytest.fail("不该抽高清帧"))
+    monkeypatch.setattr(S, "_get_ocr", lambda: pytest.fail("OCR 关闭时不该加载引擎"))
+
+    cfg = SlideConfig(ocr_enabled=False, sample_interval_ms=2000)
+    got = S.detect_slides("ffmpeg", tmp_path / "v.mp4", 4000, tmp_path / "out", cfg)
+
+    assert len(got) == 1
+    assert got[0].image_path == str(frame.path)
+    assert got[0].ocr_text == ""
+
+
+def test_reocr_slides_refreshes_text_and_prunes_old_frames(monkeypatch, tmp_path):
+    """回补要换掉旧图与旧文字，并清掉不再被引用的旧高清帧。"""
+    from vedioai.ingest import slides as S
+
+    hd = tmp_path / "hd"
+    hd.mkdir()
+    stale = hd / "s_000009.jpg"
+    stale.write_bytes(b"old")
+
+    target = [Slide(idx=0, start_ms=1000, end_ms=2000, image_path="old.jpg", ocr_text="旧文字")]
+
+    widths: list[object] = []
+
+    def fake_extract(ffmpeg, src, dst, at_ms, width=960, **kw):
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_bytes(b"x")
+        widths.append(width)
+        return dst
+
+    monkeypatch.setattr(S, "extract_frame", fake_extract)
+    monkeypatch.setattr(S, "_get_ocr", lambda: object())
+    monkeypatch.setattr(S, "_ocr_image", lambda ocr, path: "新文字")
+
+    out = S.reocr_slides("ffmpeg", tmp_path / "v.mp4", target, tmp_path, width=None)
+
+    assert [s.ocr_text for s in out] == ["新文字"]
+    assert out[0].image_path.endswith("s_000000.jpg")
+    assert widths == [None], "回补也要用原始分辨率"
+    assert not stale.exists(), "不再被引用的旧高清帧应被清理"
+    assert Path(out[0].image_path).exists(), "新帧必须留下"
 

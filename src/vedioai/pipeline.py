@@ -31,7 +31,7 @@ from .ingest.media import (
     slice_audio,
 )
 from .ingest.segment import attach_parents, build_chapters, build_chunks
-from .ingest.slides import detect_slides
+from .ingest.slides import detect_slides, reocr_slides
 from .llm.client import LLMClient
 from .schema import Segment, Video, VideoStatus
 from .store import Store
@@ -211,6 +211,67 @@ def repair_videos(
             progress(i + 1, len(targets), f"{video_id} 纠正 {total} 处")
 
     return report
+
+
+def reocr_video(
+    cfg: Config,
+    store: Store,
+    video_id: str,
+    *,
+    embedder: EmbedderLike | None = None,
+    progress=None,
+) -> dict[str, int]:
+    """用原始分辨率重跑**已入库**课程的课件 OCR，不重新转写。
+
+    为什么单独有这个函数，而不是重跑一遍 ingest：
+    - ASR 是整条链路里唯一按小时计费的环节，而转写与课件 OCR 毫无关系；
+    - 每张课件的时间轴（变化检测的结果）已经在库里，不必重算。
+
+    背景：早期版本把代表帧压到 960 宽再 OCR，导致
+    "uiautomatorviewer.bat" 被读成 "uiautomatoniewer.bet" 之类的错字。
+    这些错字已经进了库、进了摘要和笔记，所以必须回补一遍。
+    """
+    video = store.get_video(video_id)
+    if video is None:
+        raise ValueError(f"未找到课程：{video_id}")
+    src = Path(video.path)
+    if not src.exists():
+        raise FileNotFoundError(f"源视频已不在原位置，无法重抽帧：{src}")
+
+    slides = store.get_slides(video_id)
+    if not slides:
+        return {}
+
+    out_dir = cfg.library_dir / video_id / "slides"
+    slides = reocr_slides(
+        cfg.media.ffmpeg,
+        src,
+        slides,
+        out_dir,
+        width=cfg.slides.ocr_width or None,
+        progress=progress,
+    )
+    store.replace_slides(video_id, slides)
+
+    # 课件文字换了，块里的「（课件）…」段也要跟着换。
+    # 块的 slide_idxs 入库时已算好，直接复用——重建分段会连带清掉块摘要，
+    # 那是 LLM 花钱生成的，不能白扔。
+    by_idx = {s.idx: s for s in slides}
+    touched = 0
+    for chunk in store.get_chunks(video_id):
+        new_ocr = "\n".join(
+            by_idx[i].ocr_text
+            for i in chunk.slide_idxs
+            if i in by_idx and by_idx[i].ocr_text
+        ).strip()
+        if new_ocr != (chunk.ocr_text or ""):
+            store.update_chunk_texts(video_id, chunk.chunk_id, chunk.text, new_ocr)
+            touched += 1
+
+    stats: dict[str, int] = {"slides": len(slides), "chunks": touched}
+    # 新 OCR 文字还没过术语表；顺带纠错并重算向量（repair 本身幂等）
+    stats.update(repair_videos(cfg, store, [video_id], embedder=embedder).get(video_id, {}))
+    return stats
 
 
 class IngestPipeline:

@@ -70,18 +70,34 @@ class Glossary:
     corrections: list[Correction] = field(default_factory=list)
     suspects: list[str] = field(default_factory=list)
     trusted: list[str] = field(default_factory=list)
+    # 实际载入了哪几个文件（手写表 + 自动表），便于排查「规则为什么没生效」
+    sources: list[Path] = field(default_factory=list)
 
     # ------------------------------------------------------------ 加载
 
     @classmethod
     def load(cls, path: Path | None, video_id: str = "") -> Glossary:
-        """读术语表。文件不存在时返回空表（不报错，纠错层是可选增强）。"""
+        """读术语表。文件不存在时返回空表（不报错，纠错层是可选增强）。
+
+        会同时读取手写表与同目录下的 ``*.auto.yaml``（机器判定产物）。
+        两者分开存放：手写那份的注释是策展成果，不能让机器覆写。
+        """
         gl = cls()
         gl.trusted = list(_DEFAULT_TRUSTED)
-        if path is None or not Path(path).exists():
-            return gl
+        gl.sources = []
 
-        raw = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+        for candidate in (path, _auto_path(path) if path is not None else None):
+            if candidate is None or not Path(candidate).exists():
+                continue
+            gl.sources.append(Path(candidate))
+            gl._merge_file(Path(candidate), video_id)
+
+        # 长串优先替换，避免短串先命中把长串切碎
+        gl.corrections.sort(key=lambda c: max(len(w) for w in c.wrong), reverse=True)
+        return gl
+
+    def _merge_file(self, path: Path, video_id: str) -> None:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
 
         def add_corrections(items) -> None:
             for item in items or []:
@@ -93,7 +109,7 @@ class Glossary:
                     wrong = [wrong]
                 wrong = tuple(str(w).strip() for w in wrong if str(w).strip())
                 if right and wrong:
-                    gl.corrections.append(
+                    self.corrections.append(
                         Correction(wrong=wrong, right=right, reason=str(item.get("reason") or ""))
                     )
 
@@ -102,14 +118,10 @@ class Glossary:
         course = (raw.get("courses") or {}).get(video_id) or {}
         add_corrections(course.get("corrections"))
 
-        gl.suspects = [str(s) for s in (raw.get("suspects") or [])]
-        gl.suspects += [str(s) for s in (course.get("suspects") or [])]
-        gl.trusted += [str(s) for s in (raw.get("trusted") or [])]
-        gl.trusted += [str(s) for s in (course.get("trusted") or [])]
-
-        # 长串优先替换，避免短串先命中把长串切碎
-        gl.corrections.sort(key=lambda c: max(len(w) for w in c.wrong), reverse=True)
-        return gl
+        self.suspects += [str(s) for s in (raw.get("suspects") or [])]
+        self.suspects += [str(s) for s in (course.get("suspects") or [])]
+        self.trusted += [str(s) for s in (raw.get("trusted") or [])]
+        self.trusted += [str(s) for s in (course.get("trusted") or [])]
 
     # ------------------------------------------------------------ 纠错
 
@@ -322,6 +334,267 @@ def _dedupe(findings: list[Finding]) -> list[Finding]:
         for f in ordered
         if not (f.kind == "listed" and any(f.term in t for t in others))
     ]
+
+
+# ------------------------------------------------------------------ 术语判定
+# 有些词在文本侧永远无法确定（"D Y L two meter" 到底念的什么？），只能放弃；
+# 但也有些词能靠**交叉证据**定下来——最典型的是课件 OCR。
+# OCR 直接取自画面，不会「听错」；语音会。所以当同一位置 OCR 写出了
+# 正确写法、而语音转写是错的，答案就在那里。
+#
+# 本节的职责：把上下文交给文本模型，让它给出**结论 + 依据 + 置信度**，
+# 并强制它「证据不足就说不知道」。
+
+
+@dataclass
+class Verdict:
+    """对一个待确认词的判定结论。"""
+
+    term: str
+    correct: str = ""
+    confidence: str = "low"
+    evidence: str = ""
+    reason: str = ""
+    action: str = "uncertain"
+    # 依据是否真的出现在我们给的上下文里（防模型编造依据）
+    evidence_verified: bool = False
+    contexts_used: int = 0
+
+    @property
+    def applicable(self) -> bool:
+        """能否安全地写成一条自动纠正规则。
+
+        要求同时满足：动作是 replace、有正确写法、置信度不是 low、
+        且依据能在给定上下文里逐字找到。任一不满足都只能交人工。
+        """
+        return (
+            self.action == "replace"
+            and bool(self.correct.strip())
+            and self.confidence in ("high", "medium")
+            and self.evidence_verified
+            and self.correct != self.term
+        )
+
+
+def _dedup_key(text: str) -> str:
+    """去重键：保留中文与字母数字，只归一化空白与标点。
+
+    不能复用 ``_skeleton``——它按 ``[^a-z0-9]`` 清洗，会把**中文全部丢掉**。
+    那样一来，凡是包含同一个英文术语的片段，键都会退化成同一个英文残片
+    （如都变成 "dyltwometer"），互相碰撞、被误判为重复而丢弃。
+    实测这个 bug 会让模型每次只看到一条上下文，判定质量凭空下降。
+    """
+    return re.sub(r"[\s\u3000]+", "", text).lower()
+
+
+def collect_context(
+    store,
+    video_id: str,
+    term: str,
+    *,
+    window: int = 110,
+    limit: int = 8,
+) -> tuple[list[str], set[str]]:
+    """收集某个词在材料里出现的上下文。
+
+    返回 ``(带来源标注的上下文列表, 可作证据的原文集合)``。
+
+    第二个返回值很重要：**摘要类文本不能当证据**。摘要由 LLM 生成，它可能已经
+    把错字「合理化」成了另一个词（实测 "D Y L two meter" 就被摘要写成了
+    "Dalvik Debug Monitor"）。拿 LLM 的产物去校验 LLM 的判断是循环论证，
+    看着像有依据，其实依据本身就是幻觉。所以只有画面 OCR 与原始转写
+    ——这两类一手材料——才能用于逐字核对。
+    """
+    from .schema import ms_to_hms
+
+    found: list[tuple[int, str, str]] = []  # (优先级, 带来源标注的整条, 片段正文)
+    ground_truth: list[str] = []
+
+    def add(priority: int, label: str, text: str, ms: int | None = None, *, trusted: bool) -> None:
+        if not text:
+            return
+        start = 0
+        while True:
+            i = text.find(term, start)
+            if i < 0:
+                break
+            lo = max(0, i - window)
+            hi = min(len(text), i + len(term) + window)
+            snippet = text[lo:hi].replace("\n", " ")
+            stamp = f"[{ms_to_hms(ms)}] " if ms is not None else ""
+            found.append((priority, f"{label} {stamp}…{snippet}…", snippet))
+            if trusted:
+                ground_truth.append(snippet)
+            start = i + len(term)
+
+    # 一手材料：画面 OCR 与原始转写。OCR 取自画面不会听错；转写会被听错但可核对。
+    for slide in store.get_slides(video_id):
+        add(0, "课件OCR", slide.ocr_text or "", slide.start_ms, trusted=True)
+    for chunk in store.get_chunks(video_id):
+        add(0, "片段内课件", chunk.ocr_text or "", chunk.start_ms, trusted=True)
+    # 二手材料：摘要由 LLM 写的，只能提供线索，不能当证据
+    for chapter in store.get_chapters(video_id):
+        add(1, "章节摘要", chapter.summary or "", chapter.start_ms, trusted=False)
+    for chunk in store.get_chunks(video_id):
+        add(1, "片段摘要", chunk.summary or "", chunk.start_ms, trusted=False)
+        add(1, "片段正文", chunk.text or "", chunk.start_ms, trusted=True)
+    add(1, "全课摘要", store.get_video_summary(video_id) or "", trusted=False)
+    for segment in store.get_segments(video_id):
+        add(2, "转写", segment.text or "", segment.start_ms, trusted=True)
+
+    # 去重（同一句话在摘要与正文里会重复出现），按可信度优先。
+    # 键取**片段正文**而不是整条标注文本——标注里的来源名会让同一句话看起来不同。
+    seen: set[str] = set()
+    out: list[str] = []
+    for _, text, snippet in sorted(found, key=lambda item: item[0]):
+        key = _dedup_key(snippet)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(text)
+        if len(out) >= limit:
+            break
+    return out, set(ground_truth)
+
+
+def adjudicate_suspects(
+    glossary: Glossary,
+    store,
+    client,
+    video_id: str,
+    *,
+    terms: list[str] | None = None,
+    window: int = 110,
+    limit: int = 8,
+) -> list[Verdict]:
+    """让文本模型依据上下文判定待确认术语。
+
+    ``terms`` 省略时用术语表里的 suspects。只会返回**有上下文**的词——
+    上下文为空的词无需问模型，问了也只能得到猜测。
+    """
+    from .llm import prompts
+
+    targets = terms if terms is not None else list(glossary.suspects)
+    verdicts: list[Verdict] = []
+
+    for term in targets:
+        contexts, ground_truth = collect_context(store, video_id, term, window=window, limit=limit)
+        if not contexts:
+            continue
+        body = "\n".join(f"- {c}" for c in contexts)
+        messages = [
+            {"role": "system", "content": "你是一位严谨的转写校对员，只依据给定上下文判断，不猜测。"},
+            {"role": "user", "content": prompts.TERM_ADJUDICATION.format(term=term, contexts=body)},
+        ]
+        try:
+            data, _reply = client.chat_json(messages, max_tokens=800)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("判定 %s 失败：%s", term, exc)
+            continue
+
+        verdict = Verdict(
+            term=term,
+            correct=str(data.get("correct") or "").strip(),
+            confidence=str(data.get("confidence") or "low").strip().lower(),
+            evidence=str(data.get("evidence") or "").strip(),
+            reason=str(data.get("reason") or "").strip(),
+            action=str(data.get("action") or "uncertain").strip().lower(),
+            contexts_used=len(contexts),
+        )
+        # 反幻觉：模型的「依据」必须能在**一手材料**里逐字找到。
+        #
+        # 这里刻意只用 ground_truth（画面 OCR + 原始转写），而不是全部上下文：
+        # 摘要与全课摘要都是 LLM 写的，可能已经把错字「合理化」成了另一个词。
+        # 实测 "D Y L two meter" 的摘要里就写着 "Dalvik Debug Monitor"——
+        # 那是上一轮 LLM 的产物。若拿它当证据，模型只需引用一句幻觉就能获得
+        # 「依据已核实」的印章，等于把循环论证包装成证据。宁可判不了。
+        if verdict.evidence:
+            norm_ev = _skeleton(verdict.evidence)
+            haystack = _skeleton("\n".join(ground_truth))
+            verdict.evidence_verified = bool(norm_ev) and norm_ev in haystack
+        if verdict.action == "replace" and not verdict.evidence_verified:
+            verdict.action = "uncertain"
+            verdict.reason = (
+                verdict.reason + "（依据未能在画面 OCR/原始转写中逐字核实，降级为待人工）"
+            ).strip()
+
+        verdicts.append(verdict)
+
+    return verdicts
+
+
+def render_verdicts(verdicts: list[Verdict]) -> str:
+    """把判定结论渲染成可读表格。"""
+    if not verdicts:
+        return "没有可判定的待确认术语（可能材料里找不到它们的上下文）。"
+    lines = [
+        "| 待确认词 | 判定结论 | 置信度 | 动作 | 依据 |",
+        "|---|---|---|---|---|",
+    ]
+    for v in verdicts:
+        correct = v.correct or "—"
+        ev = (v.evidence or "").replace("|", "\\|")
+        if len(ev) > 70:
+            ev = ev[:70] + "…"
+        reason = (v.reason or "").replace("|", "\\|")
+        cell = f"{ev}<br>{reason}" if reason else ev
+        lines.append(
+            f"| `{v.term}` | `{correct}` | {v.confidence} | {v.action} | {cell} |"
+        )
+    return "\n".join(lines)
+
+
+AUTO_GLOSSARY_HEADER = """# 自动生成的术语纠正（机器判定，可随时删除重建）
+#
+# 由 `vedioai adjudicate --apply` 生成，依据是课件 OCR 与转写上下文。
+# 与 vedioai.glossary.yaml 分开存放的理由：
+#   - 手写那份是人类策展的，注释宝贵，不能让机器覆写；
+#   - 这份可以随时删掉重跑，不影响人工积累。
+#
+# 想否定某条结论：直接从下面删掉即可，不会被重新加回来（除非再跑一次 --apply）。
+"""
+
+
+def write_auto_glossary(path: Path, verdicts: list[Verdict]) -> tuple[Path, int]:
+    """把可安全采纳的判定写入自动术语表。返回（路径, 写入条数）。
+
+    已存在的条目会按 ``wrong`` 合并去重，因此反复执行不会累积重复。
+    """
+    existing: dict = {}
+    if path.exists():
+        existing = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+
+    corrections: list[dict] = list(existing.get("corrections") or [])
+    by_wrong = {tuple(c.get("wrong") or []): c for c in corrections}
+
+    written = 0
+    for v in verdicts:
+        if not v.applicable:
+            continue
+        key = (v.term,)
+        entry = {
+            "wrong": [v.term],
+            "right": v.correct,
+            "reason": (f"文本模型依据上下文判定（置信度 {v.confidence}）：{v.reason}")[:300],
+        }
+        if key in by_wrong:
+            by_wrong[key].update(entry)
+        else:
+            corrections.append(entry)
+            by_wrong[key] = entry
+        written += 1
+
+    payload = {"version": 1, "corrections": corrections}
+    text = AUTO_GLOSSARY_HEADER + yaml.safe_dump(
+        payload, allow_unicode=True, sort_keys=False, default_flow_style=False
+    )
+    path.write_text(text, encoding="utf-8", newline="\n")
+    return path, written
+
+
+def _auto_path(path: Path) -> Path:
+    """``vedioai.glossary.yaml`` → ``vedioai.glossary.auto.yaml``。"""
+    return path.with_name(f"{path.stem}.auto{path.suffix}")
 
 
 # ------------------------------------------------------------------ 便捷函数

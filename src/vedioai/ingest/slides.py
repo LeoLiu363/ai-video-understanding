@@ -18,7 +18,7 @@ from PIL import Image
 
 from ..config import SlideConfig
 from ..schema import Slide
-from .media import _run  # noqa: PLC2701  同一包内复用 ffmpeg 调用封装
+from .media import _run, extract_frame  # noqa: PLC2701  同一包内复用 ffmpeg 调用封装
 
 log = logging.getLogger(__name__)
 
@@ -109,6 +109,71 @@ def extract_frames(
     return frames
 
 
+def _hd_dir(out_dir: Path) -> Path:
+    """高清课件帧的存放目录（与变化检测的采样帧分开，删起来互不影响）。"""
+    return out_dir / "hd"
+
+
+def extract_hd_frame(
+    ffmpeg: str,
+    src: Path,
+    out_dir: Path,
+    at_ms: int,
+    *,
+    width: int | None = None,
+    idx: int,
+) -> Path:
+    """按需抽一张高清代表帧。``width=None`` 用原始分辨率。"""
+    return extract_frame(
+        ffmpeg, src, _hd_dir(out_dir) / f"s_{idx:06d}.jpg", at_ms, width=width
+    )
+
+
+def clear_hd_frames(out_dir: Path, keep: set[str] | None = None) -> None:
+    """清掉不再被引用的高清帧，避免反复重跑时越积越多。"""
+    hd = _hd_dir(out_dir)
+    if not hd.exists():
+        return
+    for path in hd.glob("s_*.jpg"):
+        if keep is not None and str(path) in keep:
+            continue
+        path.unlink(missing_ok=True)
+
+
+def reocr_slides(
+    ffmpeg: str,
+    src: Path,
+    slides: list[Slide],
+    out_dir: Path,
+    *,
+    width: int | None = None,
+    progress=None,
+) -> list[Slide]:
+    """对**已入库**的幻灯片重抽高清帧并重跑 OCR，就地更新并返回。
+
+    存在的理由：``vedioai reocr`` 要在不重新转写（ASR 是唯一按小时计费的环节）
+    的前提下，把旧的低分辨率 OCR 结果换成高清结果。时间轴来自库里的
+    start_ms，所以不需要再做一遍变化检测。
+    """
+    ocr = _get_ocr()
+    if ocr is None:
+        raise RuntimeError("RapidOCR 不可用，无法重跑 OCR：pip install rapidocr-onnxruntime")
+
+    for i, slide in enumerate(slides):
+        if progress:
+            progress(i, len(slides), f"重跑 OCR {i}/{len(slides)}")
+        image_path = extract_hd_frame(
+            ffmpeg, src, out_dir, slide.start_ms, width=width, idx=slide.idx
+        )
+        slide.image_path = str(image_path)
+        slide.ocr_text = _ocr_image(ocr, image_path)
+
+    if progress:
+        progress(len(slides), len(slides), f"重跑 OCR {len(slides)}/{len(slides)}")
+    clear_hd_frames(out_dir, keep={s.image_path for s in slides})
+    return slides
+
+
 def detect_slides(
     ffmpeg: str,
     src: Path,
@@ -128,6 +193,7 @@ def detect_slides(
     frames = extract_frames(
         ffmpeg, src, out_dir,
         interval_ms=cfg.sample_interval_ms,
+        width=cfg.detect_width,
         max_frames=cfg.max_slides * 6,
     )
     if not frames:
@@ -148,17 +214,29 @@ def detect_slides(
 
     groups = groups[: cfg.max_slides]
     ocr = _get_ocr() if cfg.ocr_enabled else None
+    if ocr is not None:
+        # 重跑时先清掉上一轮的高清帧，避免越积越多（下面会重新抽）
+        clear_hd_frames(out_dir)
 
     slides: list[Slide] = []
     for gi, group in enumerate(groups):
         start_ms = group[0].ms
         end_ms = groups[gi + 1][0].ms if gi + 1 < len(groups) else max(duration_ms, start_ms + 1000)
-        image_path = group[0].path
 
-        ocr_text = ""
-        if ocr is not None:
+        if ocr is None:
+            # 不做 OCR 时保留变化检测那一遍的小图，省磁盘
+            image_path = group[0].path
+            ocr_text = ""
+        else:
             if progress:
                 progress(gi, len(groups), f"课件 OCR {gi}/{len(groups)}")
+            # 代表帧改用**原始分辨率**重抽再 OCR。
+            # 变化检测那遍必须便宜（上千帧），但 OCR 需要看清小字——
+            # 同一帧喂 960 会把 "uiautomatorviewer.bat" 读成
+            # "uiautomatoniewer.bet"，喂原图就对。按需抽帧单张约 0.2s。
+            image_path = extract_hd_frame(
+                ffmpeg, src, out_dir, start_ms, width=cfg.ocr_width or None, idx=gi
+            )
             ocr_text = _ocr_image(ocr, image_path)
 
         slides.append(

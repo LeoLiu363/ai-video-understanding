@@ -426,6 +426,139 @@ def cmd_repair(args, cfg) -> int:
     return 0
 
 
+def cmd_reocr(args, cfg) -> int:
+    """用原始分辨率重跑已入库课程的课件 OCR（不重新转写，零 ASR 成本）。
+
+    什么时候需要：抽帧分辨率提高后，库里留着的仍是旧的低分辨率 OCR 结果——
+    那些错字已经进了摘要和笔记，光改代码不会自动回补。
+    """
+    from .pipeline import reocr_video
+
+    store = Store(cfg.db_path)
+    try:
+        video_id = _resolve_video_id(store, args.video)
+    except SystemExit:
+        store.close()
+        raise
+
+    embedder = None
+    if not args.no_reembed:
+        embedder, _ = build_local_models(cfg)
+        if not embedder.available:
+            print(
+                "提示：没有可用的嵌入模型，本次只更新文本、不重算向量。",
+                file=sys.stderr,
+            )
+            embedder = None
+
+    ocr_width = cfg.slides.ocr_width or None
+    where = "原始分辨率" if ocr_width is None else f"{ocr_width}px 宽"
+    print(f"用{where}重跑课件 OCR（不重新转写）…")
+
+    def on_progress(done: int, total: int, message: str) -> None:
+        if total:
+            print(f"  [{done}/{total}] {message}")
+
+    try:
+        stats = reocr_video(cfg, store, video_id, embedder=embedder, progress=on_progress)
+    except Exception as exc:  # noqa: BLE001
+        print(f"重跑 OCR 失败：{exc}", file=sys.stderr)
+        store.close()
+        return 1
+
+    if not stats:
+        print(f"{video_id}：库里没有课件，无需重跑。")
+        store.close()
+        return 0
+
+    print(
+        f"{video_id}：重跑 {stats.get('slides', 0)} 张课件，"
+        f"更新 {stats.get('chunks', 0)} 个文本块"
+        + (f"，并重算 {stats['reembedded']} 个向量" if "reembedded" in stats else "")
+    )
+    store.close()
+    return 0
+
+
+def cmd_adjudicate(args, cfg) -> int:
+    """让文本模型依据上下文判定术语表里待确认的词。"""
+    from .glossary import (
+        Glossary,
+        adjudicate_suspects,
+        _auto_path,
+        render_verdicts,
+        write_auto_glossary,
+    )
+    from .llm.client import from_llm_config
+
+    store = Store(cfg.db_path)
+    try:
+        video_id = _resolve_video_id(store, args.video) if args.video else None
+    except SystemExit:
+        store.close()
+        raise
+
+    if video_id is None:
+        videos = store.list_videos()
+        if not videos:
+            print("课程库为空。")
+            store.close()
+            return 1
+        video_id = videos[0]["video_id"]
+
+    glossary = Glossary.load(cfg.glossary_path, video_id)
+    suspects = args.term or list(glossary.suspects)
+    # 去重保序
+    seen: set[str] = set()
+    suspects = [s for s in suspects if not (s in seen or seen.add(s))]
+
+    if not suspects:
+        print("术语表里没有待确认的词（suspects 为空）。")
+        store.close()
+        return 0
+
+    print(f"待判定 {len(suspects)} 个词，逐个收集上下文并交文本模型判断…")
+    print(f"（载入的术语表：{', '.join(str(p.name) for p in glossary.sources) or '无'}）")
+
+    try:
+        client = from_llm_config(cfg.llm)
+    except Exception as exc:  # noqa: BLE001
+        print(f"无法构造文本模型客户端：{exc}", file=sys.stderr)
+        store.close()
+        return 1
+
+    try:
+        verdicts = adjudicate_suspects(glossary, store, client, video_id, terms=suspects)
+    finally:
+        client.close()
+        store.close()
+
+    if not verdicts:
+        print("这些词在材料里找不到上下文，无法判定。")
+        return 0
+
+    print()
+    print(render_verdicts(verdicts))
+    print()
+
+    applicable = [v for v in verdicts if v.applicable]
+    uncertain = [v for v in verdicts if not v.applicable]
+    print(f"可自动采纳：{len(applicable)} 条；仍需人工确认：{len(uncertain)} 条")
+    for v in uncertain:
+        print(f"  · {v.term} → {v.correct or '（未定）'}（{v.confidence}）{v.reason[:60]}")
+
+    if args.apply and applicable:
+        out = _auto_path(cfg.glossary_path)
+        path, n = write_auto_glossary(out, verdicts)
+        print()
+        print(f"已写入 {n} 条到 {path.name}")
+        print("下一步：vedioai repair   # 让纠正对已入库课程生效")
+    elif applicable and not args.apply:
+        print()
+        print("加 --apply 可把上述高置信度结论写入 vedioai.glossary.auto.yaml。")
+    return 0
+
+
 def cmd_eval(args, cfg) -> int:
     from .eval_runner import main as run_eval
     from .eval_runner import scaffold
@@ -514,6 +647,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="文本改后不重算向量（默认会重算；不重算会让检索召回变差）",
     )
     p.set_defaults(func=cmd_repair)
+
+    p = sub.add_parser(
+        "reocr",
+        help="用原始分辨率重跑已入库课程的课件 OCR（提高小字识别率，不重新转写）",
+    )
+    p.add_argument("video", help="课程 ID、标题片段或视频路径")
+    p.add_argument("--no-reembed", action="store_true", help="不重算向量（默认会重算）")
+    p.set_defaults(func=cmd_reocr)
+
+    p = sub.add_parser(
+        "adjudicate",
+        help="让文本模型依据上下文判定术语表里待确认的词（如 ASR 听错的名词）",
+    )
+    p.add_argument("video", nargs="?", help="课程 ID 或标题片段；省略则取课程库第一门")
+    p.add_argument("--term", action="append", help="只判定指定词，可重复；省略则用术语表的 suspects")
+    p.add_argument("--apply", action="store_true", help="把可采纳的结论写入 vedioai.glossary.auto.yaml")
+    p.set_defaults(func=cmd_adjudicate)
 
     p = sub.add_parser("eval", help="跑评估集（唯一裁判）")
     p.add_argument("questions", nargs="?", default=DEFAULT_QUESTIONS)

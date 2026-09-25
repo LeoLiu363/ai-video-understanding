@@ -55,9 +55,16 @@ suspects:
   # 注意一个真实观察：重跑笔记时，模型自己把它猜成了 "dmtracedump" 并加注
   # 「转写中称 D Y L two meter」。猜得未必错，但**每次猜的不同、不可复现**——
   # 这正是必须由术语表做确定性处理的理由，也是这里只标记不替换的理由。
+  #
+  # 后续（adjudicate 判定）：文本模型依据一手转写推出 "Dalvik"（置信度 medium），
+  # 理由是该句主语是 DDMS、而 DDMS 的全称是 Dalvik Debug Monitor。音节也对得上
+  # （Dal-vik → "D Y L"；Debug Monitor → "two meter"）。但仍然只是推断，未采纳。
   - "D Y L two meter"
   # [09:06] "然后我们直接点这个 URL 分类" —— 与 "URL to meta" 属同一类误听，
   # 但此处上下文是「点击某个入口」，无法百分百确定原词，故只标记。
+  #
+  # 后续（adjudicate 判定）：文本模型明确回「无 OCR 佐证、不猜」，保持存疑。
+  # 可参考的画面证据：同一时刻的课件显示 uiautomatorviewer 窗口已打开。
   - "URL分类"
   - "URL 分类"
 
@@ -65,9 +72,28 @@ suspects:
 courses:
   "7aba99cf879083b7":
     suspects:
-      # OCR 与转写里同一文件出现两种拼写（winco / wincon），必有一处错。
-      # 不确定哪个对，交给人工。
+      # 这个文件名**无法从材料里确定**，原因很具体：
+      #
+      # 画面上的文件名被 Windows 资源管理器自己截断了，显示为
+      #     jeb_winco...monitor.bat
+      # 那个 "..." 是系统的省略号，不是 OCR 的错。判别真伪的那个字符
+      # （n）**根本没渲染到屏幕上**，所以 OCR 再准也读不到它。
+      # 高清重跑 OCR 后依然是 "jeb_winco...monitor.bat"（128 次），并未变清晰——
+      # 这正好印证：瓶颈在画面本身，不在识别能力。
+      #
+      # 已排除的一种猜想：不是 OCR 吃掉了 n。用同一套 OCR 把两种候选写法渲染成
+      # 11px 小字（甚至再缩一半）去测，wincon 与 winco 都能逐字读对。
+      #
+      # 现有线索指向 wincon，但属于**外部知识**而非材料证据，故不自动替换：
+      #   JEB 官方只发布 jeb_wincon.bat（wincon = Windows Console），
+      #   从未有过 jeb_winco_monitor.bat 这个文件。
+      # 要定论，得看讲师本机的 jeb 目录——那是材料之外的信息。
+      #
+      # 注意：该字符串只出现在**摘要**里；画面 OCR 里只有被截断的形式。
+      # 而摘要不能当证据（LLM 可能已把它合理化），所以判定工具回「不确定」是对的。
       - "jeb_wincon_monitor.bat"
+      - "jeb_winco_monitor.bat"
+      - "jeb_winco...monitor.bat"
     trusted:
       # 本课反复出现且已核对无误
       - "com.kejian.one"

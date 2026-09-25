@@ -274,17 +274,37 @@ def slice_audio(ffmpeg: str, src: Path, dst: Path, start_ms: int, end_ms: int) -
     return dst
 
 
-def extract_frame(ffmpeg: str, src: Path, dst: Path, at_ms: int, width: int = 960) -> Path:
-    """抽取指定时刻的帧。用于课件图。"""
+def extract_frame(
+    ffmpeg: str,
+    src: Path,
+    dst: Path,
+    at_ms: int,
+    width: int | None = 960,
+    *,
+    quality: int = 2,
+) -> Path:
+    """抽取指定时刻的帧。用于课件图。
+
+    ``width=None`` 表示**保持原始分辨率**，这是 OCR 该用的值。
+
+    为什么 OCR 不该缩图：RapidOCR 内部按 ``limit_side_len=736,
+    limit_type=min`` 工作——短边不足 736 时它会**向上插值放大**。所以喂
+    960 宽的图，等于我们先丢掉一半像素、它再把模糊插值猜回来，成本没省，
+    精度白丢。实测同一帧只有喂图分辨率不同：96 缩略图把
+    "uiautomatorviewer.bat" 读成 "uiautomatoniewer.bet"、把 "BASE+MD5"
+    读成 "BASE+MDS"，原始分辨率全对，耗时只多 2~16%。
+    """
     dst.parent.mkdir(parents=True, exist_ok=True)
-    _run(
-        [
-            ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
-            "-ss", f"{at_ms / 1000:.3f}",
-            "-i", str(src),
-            "-frames:v", "1",
-            "-vf", f"scale={width}:-2",
-            str(dst),
-        ]
-    )
+    cmd = [
+        ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+        "-ss", f"{at_ms / 1000:.3f}",
+        "-i", str(src),
+        "-frames:v", "1",
+    ]
+    if width:
+        cmd += ["-vf", f"scale={width}:-2"]
+    # 文字细笔画对 JPEG 压缩很敏感，默认质量给足（2 最好、31 最差）
+    cmd += ["-q:v", str(quality), str(dst)]
+    _run(cmd)
     return dst
+

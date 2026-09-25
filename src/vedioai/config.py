@@ -111,6 +111,18 @@ class SlideConfig:
     max_hold_ms: int = 120_000
     max_slides: int = 400
     ocr_enabled: bool = True
+    # 变化检测用的采样宽度。这一遍要处理上千帧，必须便宜；屏幕录制类课程
+    # 画面变化稀疏，960 足够判定换页。
+    detect_width: int = 960
+    # OCR 用的宽度。0 = 保持原始分辨率（默认，且强烈建议）。
+    #
+    # 为什么必须和 detect_width 分开：实测把 1924 宽的录屏压到 960 再 OCR，
+    # 会把 "uiautomatorviewer.bat" 读成 "uiautomatoniewer.bet"、
+    # "BASE+MD5" 读成 "BASE+MDS"、"录制设置" 读成 "爱制设置"；
+    # 换成原始分辨率后这些全对，而 OCR 耗时只涨 2~16%——
+    # 因为 RapidOCR 内部本来就会把短边插值放大到 736（limit_type=min），
+    # 喂小图等于先丢像素、再插值猜回来，成本没省下，精度白丢。
+    ocr_width: int = 0
 
 
 @dataclass
