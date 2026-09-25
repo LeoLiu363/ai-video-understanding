@@ -368,6 +368,64 @@ def cmd_purge(args, cfg) -> int:
     return 0
 
 
+def cmd_repair(args, cfg) -> int:
+    """按术语表纠正已入库文本（不重新转写，零 ASR 成本）。"""
+    from .pipeline import repair_videos
+
+    store = Store(cfg.db_path)
+    video_ids = [_resolve_video_id(store, args.video)] if args.video else None
+
+    embedder = None
+    if not args.no_reembed:
+        embedder, _ = build_local_models(cfg)
+        if not embedder.available:
+            print(
+                "提示：没有可用的嵌入模型，本次只纠正文本、不重算向量。\n"
+                "      文本改了但向量没改，会让检索召回变差；建议之后跑一次 reindex。",
+                file=sys.stderr,
+            )
+            embedder = None
+
+    if not cfg.glossary_path.exists():
+        print(f"未找到术语表：{cfg.glossary_path}", file=sys.stderr)
+        store.close()
+        return 1
+
+    try:
+        report = repair_videos(cfg, store, video_ids, embedder=embedder, dry_run=args.dry_run)
+    except Exception as exc:  # noqa: BLE001
+        print(f"纠正失败：{exc}", file=sys.stderr)
+        store.close()
+        return 1
+
+    field_label = {
+        "segments": "转写句",
+        "chunks": "文本块",
+        "chapters": "章节",
+        "slides": "课件 OCR",
+        "video_summary": "全课摘要",
+    }
+    touched = 0
+    for video_id, stats in report.items():
+        total = sum(v for k, v in stats.items() if k != "reembedded")
+        if not total:
+            print(f"{video_id}：无需纠正")
+            continue
+        touched += 1
+        detail = "、".join(
+            f"{field_label.get(k, k)} {v} 处" for k, v in stats.items() if k != "reembedded"
+        )
+        tail = f"，并重算 {stats['reembedded']} 个向量" if "reembedded" in stats else ""
+        print(f"{video_id}：{detail}{tail}")
+
+    if args.dry_run:
+        print(f"[试运行] 共 {touched} 门课程有可纠正内容，未写入。")
+    else:
+        print(f"完成：{touched} 门课程已纠正。")
+    store.close()
+    return 0
+
+
 def cmd_eval(args, cfg) -> int:
     from .eval_runner import main as run_eval
     from .eval_runner import scaffold
@@ -443,6 +501,19 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("purge", help="删除某课程的入库产物")
     p.add_argument("video")
     p.set_defaults(func=cmd_purge)
+
+    p = sub.add_parser(
+        "repair",
+        help="按术语表纠正已入库文本（不重新转写，零 ASR 成本；纠正 ASR 听错的名词）",
+    )
+    p.add_argument("video", nargs="?", help="课程 ID 或标题片段；省略则处理全部课程")
+    p.add_argument("--dry-run", action="store_true", help="只统计将纠正多少处，不写入")
+    p.add_argument(
+        "--no-reembed",
+        action="store_true",
+        help="文本改后不重算向量（默认会重算；不重算会让检索召回变差）",
+    )
+    p.set_defaults(func=cmd_repair)
 
     p = sub.add_parser("eval", help="跑评估集（唯一裁判）")
     p.add_argument("questions", nargs="?", default=DEFAULT_QUESTIONS)

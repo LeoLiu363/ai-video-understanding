@@ -16,6 +16,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .context import estimate_tokens
+from .glossary import Glossary, render_findings
 from .llm import prompts
 from .llm.client import LLMClient, LLMError, Usage
 from .schema import Chapter, Chunk, Video, ms_to_hms
@@ -50,6 +51,8 @@ class NotesService:
         self.cfg = cfg
         self.store = store
         self.client = client
+        # 术语表用于在导出文档末尾标出可疑术语（只标记，不擅自替换）
+        self.glossary = Glossary.load(getattr(cfg, "glossary_path", None))
 
     def generate(
         self,
@@ -92,6 +95,17 @@ class NotesService:
         concepts = self._concepts_table(chunks)
 
         markdown = "\n\n".join(filter(None, [head, *sections, concepts]))
+
+        # ---- 待人工确认的术语
+        # 放在最后而不是插在正文里：不打断阅读，但保证「可能听错的词」不会被
+        # 当成事实悄悄留在文档里。只标记，不擅自替换。
+        findings = self.glossary.flag(markdown)
+        if findings:
+            gpath = getattr(self.cfg, "glossary_path", None)
+            markdown += "\n\n" + render_findings(
+                findings, Path(gpath) if gpath else None
+            )
+            log.info("文档末尾标记待确认术语 %d 处", len(findings))
 
         path = None
         if save:

@@ -24,6 +24,7 @@ from vedioai.ingest.media import MediaInfo, StreamInfo, pick_split_points, plan_
 from vedioai.ingest.segment import attach_parents, build_chapters, build_chunks  # noqa: E402
 from vedioai.config import Config, RetrieveConfig  # noqa: E402
 from vedioai.embedding import explain_ollama_failure  # noqa: E402
+from vedioai.glossary import Glossary, render_findings  # noqa: E402
 from vedioai.selfcheck import check_embedding  # noqa: E402
 from vedioai.retrieve import Retriever  # noqa: E402
 from vedioai.schema import Segment, Slide, Video, VideoStatus, hms_to_ms, ms_to_hms  # noqa: E402
@@ -623,3 +624,151 @@ def test_check_embedding_skipped_when_backend_unreachable():
     cfg.retrieve = RetrieveConfig(embed_backend="ollama")
     cfg.retrieve.ollama_url = "http://127.0.0.1:1"  # 必然连不上
     assert check_embedding(cfg) is None
+
+
+# ============================================================ 术语表（纠错层）
+# 真实事故：讲师说 uiautomator，ASR 听成 "URL to meta"，这个错字穿过摘要与
+# 章节笔记，最后变成「使用工具 "URL to meta" 查看 View 布局」这种通顺的错误结论。
+
+
+def test_glossary_missing_file_is_noop(tmp_path: Path):
+    """术语表不存在时不该报错——纠错层是可选增强，不能拖垮入库。"""
+    gl = Glossary.load(tmp_path / "nope.yaml")
+    text = "URL to meta 应该原样保留"
+    fixed, fixes = gl.correct(text)
+    assert fixed == text
+    assert fixes == []
+
+
+def test_glossary_loads_global_and_course_rules(tmp_path: Path):
+    path = tmp_path / "g.yaml"
+    path.write_text(
+        "corrections:\n"
+        '  - wrong: ["URL to meta"]\n'
+        "    right: uiautomator\n"
+        "courses:\n"
+        '  "abc":\n'
+        "    corrections:\n"
+        '      - wrong: ["D Y L"]\n'
+        "        right: UIAutomator\n",
+        encoding="utf-8",
+    )
+    gl_abc = Glossary.load(path, "abc")
+    fixed, _ = gl_abc.correct("URL to meta 和 D Y L")
+    assert "uiautomator" in fixed
+    assert "UIAutomator" in fixed
+
+    # 别的课程不该拿到 abc 的规则
+    gl_other = Glossary.load(path, "other")
+    fixed2, _ = gl_other.correct("URL to meta 和 D Y L")
+    assert "uiautomator" in fixed2
+    assert "D Y L" in fixed2
+
+
+def test_glossary_replace_is_idempotent(tmp_path: Path):
+    """重复执行必须幂等：repair 会被跑很多次，第二次不该再改动。"""
+    path = tmp_path / "g.yaml"
+    path.write_text(
+        'corrections:\n  - wrong: ["URL to meta"]\n    right: uiautomator\n',
+        encoding="utf-8",
+    )
+    gl = Glossary.load(path)
+    once, fixes1 = gl.correct("工具 URL to meta 的用法")
+    twice, fixes2 = gl.correct(once)
+    assert fixes1 and sum(f.count for f in fixes1) == 1
+    assert twice == once
+    assert fixes2 == []
+
+
+def test_glossary_counts_all_occurrences(tmp_path: Path):
+    path = tmp_path / "g.yaml"
+    path.write_text(
+        'corrections:\n  - wrong: ["URL to meta"]\n    right: uiautomator\n',
+        encoding="utf-8",
+    )
+    gl = Glossary.load(path)
+    _, fixes = gl.correct("URL to meta ... URL to meta ... URL to meta")
+    assert sum(f.count for f in fixes) == 3
+
+
+def test_glossary_flag_spaced_letters():
+    """空格字母序列（D Y L）是转写噪音的典型形态，必须报出来。"""
+    gl = Glossary.load(None)
+    kinds = {f.kind for f in gl.flag("内部使用的是 D Y L two meter 工具类")}
+    assert "spaced_letters" in kinds
+
+
+def test_glossary_flag_inconsistent_spelling():
+    """同一文件两种拼写，必有一处错。"""
+    gl = Glossary.load(None)
+    findings = gl.flag("见 jeb_winco_monitor.bat 与 jeb_wincon_monitor.bat")
+    assert any(f.kind == "inconsistent" for f in findings)
+
+
+def test_glossary_does_not_flag_numbered_variants():
+    """Hooks2 与 Hooks3 是真实存在的不同类，不是拼错。
+
+    这是被本课真实数据打出来的误报：把它们当成「拼写不一致」会让人去改
+    本来正确的东西，比漏报更有害。
+    """
+    gl = Glossary.load(None)
+    findings = gl.flag("Hooks2.afterHookedMethod 和 Hooks3.afterHookedMethod 都调了")
+    assert [f for f in findings if f.kind == "inconsistent"] == []
+
+
+def test_glossary_flag_quoted_phrase():
+    """引号包住的英文短语，像是把听错的词当成了专有名词（"URL to meta"）。"""
+    gl = Glossary.load(None)
+    findings = gl.flag('使用工具 "URL to meta" 查看布局结构')
+    assert any(f.kind == "quoted_phrase" and "URL to meta" in f.term for f in findings)
+
+
+def test_glossary_trusted_term_not_flagged():
+    """白名单里的术语不该被误报。"""
+    gl = Glossary.load(None)
+    findings = gl.flag('使用工具 "uiautomatorviewer" 查看控件')
+    assert [f for f in findings if f.kind == "quoted_phrase"] == []
+
+
+def test_glossary_flag_lists_suspects_from_file(tmp_path: Path):
+    """不确定的词只标记、不替换——这是本层的核心纪律。"""
+    path = tmp_path / "g.yaml"
+    path.write_text(
+        "suspects:\n  - \"D Y L two meter\"\n", encoding="utf-8"
+    )
+    gl = Glossary.load(path)
+    text = "内部使用的是 D Y L two meter 工具类"
+    fixed, fixes = gl.correct(text)
+    assert fixed == text, "suspects 不该被自动替换"
+    assert fixes == []
+    assert any(f.kind == "listed" for f in gl.flag(text))
+
+
+def test_render_findings_is_markdown_table():
+    gl = Glossary.load(None)
+    findings = gl.flag("用的是 D Y L two meter")
+    md = render_findings(findings, Path("vedioai.glossary.yaml"))
+    assert md.startswith("## 待人工确认的术语")
+    assert "| 术语 |" in md
+    assert "vedioai.glossary.yaml" in md
+
+
+def test_render_findings_empty_is_blank():
+    assert render_findings([], None) == ""
+
+
+def test_project_glossary_is_loadable_and_catches_real_case():
+    """项目自带的术语表必须能被解析，且真的能修掉这次的真实错字。
+
+    这条测试是回归护栏：如果谁把 vedioai.glossary.yaml 改坏或删掉规则，
+    已经修好的 "URL to meta" 会悄悄回来。
+    """
+    path = ROOT / "vedioai.glossary.yaml"
+    if not path.exists():
+        pytest.skip("项目术语表不存在")
+    gl = Glossary.load(path, "7aba99cf879083b7")
+    fixed, fixes = gl.correct("然后这个是一个叫 URL to meta 的，可以看到 view 的布局结构")
+    assert "URL to meta" not in fixed
+    assert "uiautomator" in fixed
+    assert sum(f.count for f in fixes) == 1
+

@@ -1,0 +1,133 @@
+# 自动生成的评估集骨架
+# 课程：Android关键代码定位与加密分析（7aba99cf879083b7）
+# 时长：31:28
+#
+# 章节分布：
+#    1. [00:01] 如何定位代码的关键
+#    2. [00:55] Android加密与加固分析方法
+#    3. [06:00] 关键代码定位与调试环境
+#    4. [07:25] Android Device Monitor 与 DDMS
+#    5. [08:27] Android SDK工具与uiautomatorviewer
+#    6. [08:59] 关键代码定位与加密分析
+#    7. [12:59] Xposed Hook与抓包插件解析
+#    8. [14:53] 模块激活与投屏工具操作
+#    9. [15:29] 关键代码定位与投屏操作
+#   10. [16:12] Hook加密流程与SD卡读写权限
+#   11. [16:47] 关键代码定位与Hook工具准备
+#   12. [18:48] AndroidManifest权限与Hook工具演示
+#   13. [20:56] Xposed模块配置与权限声明
+#   14. [21:47] APP权限授予与日志工具类讲解
+#   15. [22:48] CLogUtils 日志工具类实现
+#   16. [23:11] 日志分段输出与页面数据清理
+#   17. [23:47] 日志工具类与超长日志分段输出
+#   18. [24:24] 手机文件与投屏操作记录
+#   19. [24:52] Base64编码Hook执行流程
+#   20. [25:48] 加密算法Hook与调用栈分析
+#   21. [28:40] MD5加密与Base64编码的Hook分析
+#   22. [29:20] Base64调用与栈信息定位
+#   23. [30:20] 关键代码定位与反编译
+#
+# 前若干片段（供挑题目落点）：
+#   [00:01] 如何定位代码的关键
+#   [00:55] 加密算法演示与反编译环境
+#   [01:46] 加固应用分析流程与常用工具
+#   [02:22] DDMS 与 Android Device Monitor 方法追踪
+#   [03:10] 方法追踪与Android Device Monitor演示
+#   [03:51] Android Device Monitor 方法执行流程分析
+#   [04:38] Android加固与DDMS工具使用
+#   [05:15] Android Device Monitor 定位加密方法
+#   [06:00] 关键代码定位与工具环境
+#   [06:27] BuildProp Enhancer 插件与调试属性
+#   [07:25] 常用方法二：Android Device Monitor 与 DDMS
+#   [07:55] DDMS 工具类与 Android Device Monitor 界面
+#   [08:27] Android SDK 工具目录与 uiautomatorviewer 启动
+#   [08:59] URL分类与uiautomatorviewer定位
+#   [09:31] 用 UI Automator 定位控件
+#   [10:22] 第三种关键代码定位方式
+#   [10:56] 加密算法分析流程与Hook原理
+#   [11:40] 关键代码定位与加密逻辑
+#   [12:14] 关键代码定位与加密实现
+#   [12:59] OkHttp抓包插件代码解析
+#   [13:26] Xposed Hook 加密算法与字节转十六进制
+#   [13:54] AES加密与Xposed Hook演示
+#   [14:26] 手机投屏与关键代码定位工具
+#   [14:53] 模块激活与投屏工具操作
+#   [15:29] 关键代码定位工具与投屏操作
+#   [16:12] Hook 加密流程与 SD 卡读写权限
+#   [16:47] 关键代码定位与Hook工具准备
+#   [17:16] 语音助手APP权限与AES加密代码
+#   [17:46] Xposed Hook 与 Android 权限配置
+#   [18:48] AndroidManifest 权限配置讲解
+#   [19:10] AndroidManifest 权限与铭文配置
+#   [19:52] 选择目标App进行Hook
+#   [20:22] 录屏与投屏工具操作
+#   [20:56] AndroidManifest 与 Xposed 模块配置
+#   [21:47] 打开APP并授予SD卡权限
+#   [22:18] CLogUtils 日志工具类源码讲解
+#   [22:48] CLogUtils 日志工具类实现
+#   [23:11] 日志分段输出与页面数据清理
+#   [23:47] 日志工具类与超长日志分段输出
+#   [24:24] 手机文件与投屏操作记录
+#
+# 请把每题填满：question / expect_keypoints / expect_time
+# expect_keypoints 用课程里出现的具体名词与数字，不要写「讲得清楚」这类无法判定的描述。
+# 评分标准见 evals/SCORING.md
+
+version: 1
+
+course:
+  video_id: "7aba99cf879083b7"
+  title: "Android关键代码定位与加密分析"
+  notes: ""
+
+notes_expected: []
+
+questions:
+  # ===== factual ×10
+  - { id: f01, type: factual, question: "", expect_keypoints: [], expect_time: "00:01", tolerance_ms: 90000 }
+  - { id: f02, type: factual, question: "", expect_keypoints: [], expect_time: "06:00", tolerance_ms: 90000 }
+  - { id: f03, type: factual, question: "", expect_keypoints: [], expect_time: "08:27", tolerance_ms: 90000 }
+  - { id: f04, type: factual, question: "", expect_keypoints: [], expect_time: "12:59", tolerance_ms: 90000 }
+  - { id: f05, type: factual, question: "", expect_keypoints: [], expect_time: "15:29", tolerance_ms: 90000 }
+  - { id: f06, type: factual, question: "", expect_keypoints: [], expect_time: "16:47", tolerance_ms: 90000 }
+  - { id: f07, type: factual, question: "", expect_keypoints: [], expect_time: "20:56", tolerance_ms: 90000 }
+  - { id: f08, type: factual, question: "", expect_keypoints: [], expect_time: "22:48", tolerance_ms: 90000 }
+  - { id: f09, type: factual, question: "", expect_keypoints: [], expect_time: "23:47", tolerance_ms: 90000 }
+  - { id: f10, type: factual, question: "", expect_keypoints: [], expect_time: "24:52", tolerance_ms: 90000 }
+
+  # ===== cross ×10
+  - { id: c01, type: cross, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 300000 }
+  - { id: c02, type: cross, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 300000 }
+  - { id: c03, type: cross, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 300000 }
+  - { id: c04, type: cross, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 300000 }
+  - { id: c05, type: cross, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 300000 }
+  - { id: c06, type: cross, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 300000 }
+  - { id: c07, type: cross, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 300000 }
+  - { id: c08, type: cross, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 300000 }
+  - { id: c09, type: cross, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 300000 }
+  - { id: c10, type: cross, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 300000 }
+
+  # ===== visual ×10
+  - { id: v01, type: visual, question: "", expect_keypoints: [], expect_time: "00:01", tolerance_ms: 120000 }
+  - { id: v02, type: visual, question: "", expect_keypoints: [], expect_time: "06:00", tolerance_ms: 120000 }
+  - { id: v03, type: visual, question: "", expect_keypoints: [], expect_time: "08:27", tolerance_ms: 120000 }
+  - { id: v04, type: visual, question: "", expect_keypoints: [], expect_time: "12:59", tolerance_ms: 120000 }
+  - { id: v05, type: visual, question: "", expect_keypoints: [], expect_time: "15:29", tolerance_ms: 120000 }
+  - { id: v06, type: visual, question: "", expect_keypoints: [], expect_time: "16:47", tolerance_ms: 120000 }
+  - { id: v07, type: visual, question: "", expect_keypoints: [], expect_time: "20:56", tolerance_ms: 120000 }
+  - { id: v08, type: visual, question: "", expect_keypoints: [], expect_time: "22:48", tolerance_ms: 120000 }
+  - { id: v09, type: visual, question: "", expect_keypoints: [], expect_time: "23:47", tolerance_ms: 120000 }
+  - { id: v10, type: visual, question: "", expect_keypoints: [], expect_time: "24:52", tolerance_ms: 120000 }
+
+  # ===== global ×10
+  - { id: g01, type: global, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 600000 }
+  - { id: g02, type: global, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 600000 }
+  - { id: g03, type: global, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 600000 }
+  - { id: g04, type: global, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 600000 }
+  - { id: g05, type: global, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 600000 }
+  - { id: g06, type: global, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 600000 }
+  - { id: g07, type: global, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 600000 }
+  - { id: g08, type: global, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 600000 }
+  - { id: g09, type: global, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 600000 }
+  - { id: g10, type: global, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 600000 }
+

@@ -137,6 +137,8 @@ class Config:
     slides: SlideConfig = field(default_factory=SlideConfig)
     retrieve: RetrieveConfig = field(default_factory=RetrieveConfig)
     language: str = "zh"
+    # 术语表位置。None 时用项目根目录的 vedioai.glossary.yaml。
+    glossary_file: Path | None = None
 
     @property
     def library_dir(self) -> Path:
@@ -145,6 +147,15 @@ class Config:
     @property
     def db_path(self) -> Path:
         return self.data_dir / "vedioai.db"
+
+    @property
+    def glossary_path(self) -> Path:
+        """术语表路径。
+
+        刻意放在项目根目录而不是 data/：它是需要进版本库的策展知识，
+        而 data/ 是入库产物（已被 .gitignore 忽略）。
+        """
+        return self.glossary_file or (PROJECT_ROOT / "vedioai.glossary.yaml")
 
     @property
     def models_dir(self) -> Path:
@@ -169,6 +180,8 @@ def _from_yaml(cfg: Config, raw: dict) -> Config:
                 setattr(target, key, value)
     if raw.get("data_dir"):
         cfg.data_dir = Path(str(raw["data_dir"])).expanduser()
+    if raw.get("glossary_file"):
+        cfg.glossary_file = Path(str(raw["glossary_file"])).expanduser()
     if raw.get("language"):
         cfg.language = str(raw["language"])
     return cfg

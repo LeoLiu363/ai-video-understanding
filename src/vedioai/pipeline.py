@@ -20,6 +20,7 @@ from pathlib import Path
 
 from .config import Config
 from .embedding import EmbedderLike
+from .glossary import Glossary, apply_to_segments
 from .ingest.asr_volc import VolcASRClient
 from .ingest.media import (
     build_proxy,
@@ -96,6 +97,122 @@ def reindex_videos(
     return counts
 
 
+def repair_videos(
+    cfg: Config,
+    store: Store,
+    video_ids: list[str] | None = None,
+    *,
+    embedder: EmbedderLike | None = None,
+    dry_run: bool = False,
+    progress=None,
+) -> dict[str, dict[str, int]]:
+    """按术语表纠正**已入库**课程的文本，不重新转写。
+
+    存在的理由：术语表是随课程不断补充的。补完之后，已入库课程里仍留着错字——
+    转写、块文本、块摘要、章节摘要、课件 OCR、全课摘要，六处都有。
+    重跑 ingest 会再付一次 ASR 的钱，而转写根本没变，错的只是那几个名词。
+
+    只做确定性替换，所以对同一份数据反复执行是幂等的（第二次全部计 0）。
+    返回 {video_id: {字段: 替换次数}}。
+    """
+    glossary = Glossary.load(cfg.glossary_path)
+    targets = video_ids if video_ids is not None else [v["video_id"] for v in store.list_videos()]
+    report: dict[str, dict[str, int]] = {}
+
+    for i, video_id in enumerate(targets):
+        stats: dict[str, int] = {}
+
+        def tally(field_name: str, fixes) -> int:
+            n = sum(f.count for f in fixes)
+            if n:
+                stats[field_name] = stats.get(field_name, 0) + n
+            return n
+
+        # --- 转写
+        segments = store.get_segments(video_id)
+        if segments:
+            _, fixes = apply_to_segments(segments, glossary)
+            if tally("segments", fixes) and not dry_run:
+                store.replace_segments(video_id, segments)
+
+        # --- 块（正文 / 课件文字 / 标题 / 摘要）
+        chunks = store.get_chunks(video_id)
+        chunk_hits = 0
+        if chunks:
+            for c in chunks:
+                for attr in ("text", "ocr_text", "title", "summary"):
+                    val = getattr(c, attr) or ""
+                    if not val:
+                        continue
+                    new, fixes = glossary.correct(val)
+                    if fixes:
+                        chunk_hits += sum(f.count for f in fixes)
+                        setattr(c, attr, new)
+            if chunk_hits:
+                stats["chunks"] = chunk_hits
+                if not dry_run:
+                    store.replace_chunks(video_id, chunks)
+
+        # --- 章节
+        chapters = store.get_chapters(video_id)
+        chapter_hits = 0
+        if chapters:
+            for ch in chapters:
+                for attr in ("title", "summary"):
+                    val = getattr(ch, attr) or ""
+                    if not val:
+                        continue
+                    new, fixes = glossary.correct(val)
+                    if fixes:
+                        chapter_hits += sum(f.count for f in fixes)
+                        setattr(ch, attr, new)
+            if chapter_hits:
+                stats["chapters"] = chapter_hits
+                if not dry_run:
+                    store.replace_chapters(video_id, chapters)
+
+        # --- 课件 OCR
+        slides = store.get_slides(video_id)
+        slide_hits = 0
+        if slides:
+            for s in slides:
+                val = s.ocr_text or ""
+                if not val:
+                    continue
+                new, fixes = glossary.correct(val)
+                if fixes:
+                    slide_hits += sum(f.count for f in fixes)
+                    s.ocr_text = new
+            if slide_hits:
+                stats["slides"] = slide_hits
+                if not dry_run:
+                    store.replace_slides(video_id, slides)
+
+        # --- 全课摘要
+        summary = store.get_video_summary(video_id)
+        if summary:
+            new, fixes = glossary.correct(summary)
+            if tally("video_summary", fixes) and not dry_run:
+                store.set_video_summary(video_id, new)
+
+        # --- 文本变了，向量必须重算（否则检索还在按旧文本召回）
+        if not dry_run and embedder is not None and embedder.available:
+            fresh = store.get_chunks(video_id)
+            if fresh:
+                vectors = embedder.encode([c.combined_text for c in fresh])
+                store.upsert_embeddings(
+                    video_id, zip([c.chunk_id for c in fresh], vectors, strict=False)
+                )
+                stats["reembedded"] = len(fresh)
+
+        report[video_id] = stats
+        if progress:
+            total = sum(v for k, v in stats.items() if k != "reembedded")
+            progress(i + 1, len(targets), f"{video_id} 纠正 {total} 处")
+
+    return report
+
+
 class IngestPipeline:
     def __init__(
         self,
@@ -111,6 +228,8 @@ class IngestPipeline:
         self.llm = llm
         self.embedder = embedder
         self.asr = asr
+        # 术语表在构造时载入：纠错要在转写落库前生效，晚加载就晚了
+        self.glossary = Glossary.load(cfg.glossary_path)
 
     def run(
         self,
@@ -195,8 +314,21 @@ class IngestPipeline:
                 if self.asr is None:
                     raise RuntimeError("未配置火山 ASR 凭证，无法转写")
                 segments = self._transcribe(audio_path, info.duration_ms, work_dir, report)
-                self.store.replace_segments(video_id, segments)
                 log.info("转写完成：%d 句", len(segments))
+
+            # 转写纠错：ASR 会把专有名词听错（讲师说 uiautomator，转写成
+            # "URL to meta"）。错字会一路穿过切块、摘要、章节笔记，最后变成
+            # 「通顺但错误」的结论——比明显乱码危险得多。
+            # 必须在落库前纠正，否则下游全是脏的；且对复用路径也生效，
+            # 这样改了术语表不用重新转写（转写是唯一按小时计费的环节）。
+            segments, fixes = apply_to_segments(segments, self.glossary)
+            if fixes:
+                log.info(
+                    "转写纠错 %d 处：%s",
+                    sum(f.count for f in fixes),
+                    "；".join(f"{f.wrong}→{f.right}×{f.count}" for f in fixes),
+                )
+            self.store.replace_segments(video_id, segments)
 
             # ---------------------------------------------------- 5. 课件
             slides = []

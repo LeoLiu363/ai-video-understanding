@@ -1,80 +1,401 @@
 # ============================================================================
-# 评估集 · 待填写（40 题）
+# 评估集 · Android关键代码定位与加密分析
 #
-# 这是清单，不是可选步骤。按要求填满后再开始调优，否则每次改动都无法判断
-# 是变好还是变差。
-#
-# 填写建议：
-#   1. 跑 `vedioai eval --scaffold <video_id>` 生成带真实章节与本课时间点的骨架；
-#   2. 一边看视频一边出题——题目必须来自课程真实内容，不要凭空编；
-#   3. 每题写 2-4 个 expect_keypoints，用「必须出现的具体名词/数字」，不要写
-#      「讲得清楚」这种无法自动判定的描述；
-#   4. 能在视频里定位到的题，一定要填 expect_time（这是检验「点击跳转」的唯一手段）。
-#
+# video_id: 7aba99cf879083b7（31:28，PPT 为主的技术课）
+# 出题依据：真实转写（228 句）+ 课件 OCR（138 张），非凭空编写。
 # 评分标准见 evals/SCORING.md
+#
+# 覆盖：factual 10 / cross 10 / visual 10 / global 10 = 40 题
+# 视觉题刻意依赖课件截图内容（resource-id、代码、属性面板），用于检验 OCR 是否真的生效。
 # ============================================================================
 
 version: 1
 
 course:
-  video_id: ""              # 填 video_id（`vedioai list` 可查）
-  title: ""
-  notes: ""                 # 例如：纯口播 / PPT 为主
+  video_id: "7aba99cf879083b7"
+  title: "Android关键代码定位与加密分析"
+  notes: "PPT + 实操演示为主；大量关键信息在课件截图与 IDE 界面上，教学录像同时含投屏与录屏工具画面"
 
-# 10 条最该被写进学习文档的结论
-notes_expected: []
+# 写法说明：每条 = 一个「应写进学习文档的结论」，用数组给出该结论的多种关键写法，
+# 命中任一写法即算该条命中（判定口径同 expect_keypoints）。
+# 不要写成完整长句——评分是「整串连续出现」，长句必然失配（见 runs 第一版 notes_hit=0 的教训）。
+# 判定词刻意选「具体、易漏」的数值/术语，而非高频名词，否则每条都命中、没有区分度。
+notes_expected:
+  - ["一共四种", "共四种", "四种方式", "四种方法", "4种", "四种"]
+  - ["654321"]
+  - ["0102030405060708"]
+  - ["MTIzNA", "MTIzNA=="]
+  - ["296506"]
+  - ["PKCS5Padding", "AES/CBC"]
+  - ["EncryptStack"]
+  - ["InfiniteLog"]
+  - ["requestLegacyExternalStorage", "LegacyExternalStorage"]
+  - ["不可见字符", "不可见字符串"]
 
 questions:
-  # ============================================================ 事实型 ×10
-  # 考「某个具体位置讲了什么 / 某个定义是什么」。
-  # 这类型答错，九成是转写错字或时间戳偏移，先查转写，别动提示词。
-  - { id: f01, type: factual, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 90000 }
-  - { id: f02, type: factual, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 90000 }
-  - { id: f03, type: factual, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 90000 }
-  - { id: f04, type: factual, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 90000 }
-  - { id: f05, type: factual, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 90000 }
-  - { id: f06, type: factual, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 90000 }
-  - { id: f07, type: factual, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 90000 }
-  - { id: f08, type: factual, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 90000 }
-  - { id: f09, type: factual, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 90000 }
-  - { id: f10, type: factual, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 90000 }
+  # ------------------------------------------------------------------ 事实型
+  - id: f01
+    type: factual
+    question: "方法追踪（Method Tracing）是靠哪个类里的什么方法记录方法执行流程的？"
+    expect_keypoints:
+      - ["debug"]
+      - ["静态方法", "static"]
+    expect_time: "03:10"
 
-  # ======================================================== 跨段聚合型 ×10
-  # 需要合并多处证据。这类型答漏，是分段边界或召回的问题。
-  - { id: c01, type: cross, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 300000 }
-  - { id: c02, type: cross, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 300000 }
-  - { id: c03, type: cross, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 300000 }
-  - { id: c04, type: cross, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 300000 }
-  - { id: c05, type: cross, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 300000 }
-  - { id: c06, type: cross, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 300000 }
-  - { id: c07, type: cross, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 300000 }
-  - { id: c08, type: cross, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 300000 }
-  - { id: c09, type: cross, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 300000 }
-  - { id: c10, type: cross, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 300000 }
+  - id: f02
+    type: factual
+    question: "老师演示的 App 里，第二个加密方式是什么？"
+    expect_keypoints:
+      - ["Base64", "base64"]
+      - ["MD5", "md5"]
+    expect_time: "01:06"
 
-  # ============================================================ 视觉型 ×10
-  # 必须看画面才能答对。这类型答错，先确认 OCR 是否真的抽到字。
-  # 强烈建议用 PPT 为主的那门课出这类题。
-  - { id: v01, type: visual, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 120000 }
-  - { id: v02, type: visual, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 120000 }
-  - { id: v03, type: visual, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 120000 }
-  - { id: v04, type: visual, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 120000 }
-  - { id: v05, type: visual, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 120000 }
-  - { id: v06, type: visual, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 120000 }
-  - { id: v07, type: visual, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 120000 }
-  - { id: v08, type: visual, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 120000 }
-  - { id: v09, type: visual, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 120000 }
-  - { id: v10, type: visual, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 120000 }
+  - id: f03
+    type: factual
+    question: "uiautomatorviewer.bat 放在 Android SDK 的哪个目录下？"
+    expect_keypoints:
+      - ["studioSdk"]
+      - ["tools\\bin", "tools/bin", "bin"]
+    expect_time: "08:27"
 
-  # ============================================================ 全局型 ×10
-  # 统计、归纳、跨章节比较。这类型答错，查摘要树是否漏章。
-  - { id: g01, type: global, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 600000 }
-  - { id: g02, type: global, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 600000 }
-  - { id: g03, type: global, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 600000 }
-  - { id: g04, type: global, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 600000 }
-  - { id: g05, type: global, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 600000 }
-  - { id: g06, type: global, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 600000 }
-  - { id: g07, type: global, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 600000 }
-  - { id: g08, type: global, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 600000 }
-  - { id: g09, type: global, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 600000 }
-  - { id: g10, type: global, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 600000 }
+  - id: f04
+    type: factual
+    question: "为什么加固后的 App 里，有些方法名在工具中会显示成乱码？"
+    expect_keypoints:
+      - ["UTF-8", "UTF8", "U8", "utf-8"]
+      - ["不可见", "混淆"]
+    expect_time: "04:38"
+
+  - id: f05
+    type: factual
+    question: "老师的 Hook 方案为什么要求目标 App 一定要开启 SD 卡读写权限？"
+    expect_keypoints:
+      - ["SD卡", "SD 卡"]
+      - ["保存", "写入", "存到"]
+    expect_time: "16:15"
+
+  - id: f06
+    type: factual
+    question: "老师那套 Hook 打印插件的代码大约有多少行？"
+    expect_keypoints:
+      - ["900", "九百"]
+    expect_time: "13:54"
+
+  - id: f07
+    type: factual
+    question: "演示 App 里 AES 加密用到的私钥（key）明文是什么？"
+    expect_keypoints:
+      - ["654321"]
+    expect_time: "27:19"
+
+  - id: f08
+    type: factual
+    question: "AES 加密在 init 初始化时需要几个参数？为什么要这么多？"
+    expect_keypoints:
+      - ["三个", "3个", "3 个", "3个参数"]
+      - ["IV", "iv", "偏移量"]
+    expect_time: "27:55"
+
+  - id: f09
+    type: factual
+    question: "如果想抓取某一个页面的加密算法，进新页面前老师建议先做什么，来避免数据量过大？"
+    expect_keypoints:
+      - ["清空", "删除", "清掉", "清理"]
+      - ["文件"]
+    expect_time: "23:11"
+
+  - id: f10
+    type: factual
+    question: "老师讲的第四种关键代码定位方式是什么？"
+    expect_keypoints:
+      - ["关键字", "关键词"]
+      - ["搜索", "搜"]
+    expect_time: "30:31"
+
+  # -------------------------------------------------------------- 跨段聚合型
+  - id: c01
+    type: cross
+    question: "老师那份「01关键代码定位.txt」笔记里，陆续记录进去了哪几种定位方法？"
+    expect_keypoints:
+      - ["DDMS"]
+      - ["uiautomatorviewer"]
+      - ["Hook"]
+      - ["搜索", "关键字"]
+    expect_time: "30:20"
+    tolerance_ms: 300000
+
+  - id: c02
+    type: cross
+    question: "点「BASE+MD5」按钮之后，完整的加密流程是什么？中间产生了哪些具体结果？"
+    expect_keypoints:
+      - ["Base64", "base64"]
+      - ["MD5", "md5"]
+      - ["296506902c693b458707ad6f7e24a544", "296506"]
+      - ["MTIzNA", "MTIzNA=="]
+    expect_time: "28:40"
+    tolerance_ms: 300000
+
+  - id: c03
+    type: cross
+    question: "老师演示用的那个 App，总体上包含哪几种加密方式？"
+    expect_keypoints:
+      - ["native", "Native", "NATIVE"]
+      - ["Base64", "base64"]
+      - ["MD5", "md5"]
+      - ["AES"]
+      - ["DES"]
+    expect_time: "00:55"
+    tolerance_ms: 120000
+
+  - id: c04
+    type: cross
+    question: "针对加固/加密的 App，老师提到常用哪些工具来做分析？"
+    expect_keypoints:
+      - ["DDMS"]
+      - ["jadx", "jadx-gui"]
+      - ["uiautomator"]
+      - ["jeb"]
+    expect_time: "02:02"
+    tolerance_ms: 180000
+
+  - id: c05
+    type: cross
+    question: "用 DDMS 方法追踪最终定位到的那个加密方法，完整的类名和方法名是什么？"
+    expect_keypoints:
+      - ["com.kejian.one.utils.Encrypt", "kejian.one.utils.Encrypt", "Encrypt"]
+      - ["md5", "MD5"]
+    expect_time: "05:24"
+    tolerance_ms: 180000
+
+  - id: c06
+    type: cross
+    question: "AES 里那个 IV（偏移量）的明文值是什么？代码里是怎么把它设置进去的？"
+    expect_keypoints:
+      - ["0102030405060708"]
+      - ["IvParameterSpec", "IvParameter", "getBytes"]
+    expect_time: "27:16"
+    tolerance_ms: 180000
+
+  - id: c07
+    type: cross
+    question: "要用 Hook 打印的方式来分析加密，需要满足哪些前置条件？"
+    expect_keypoints:
+      - ["SD卡", "SD 卡"]
+      - ["读写权限", "权限"]
+      - ["requestLegacyExternalStorage", "低版本", "老版本"]
+    expect_time: "16:15"
+    tolerance_ms: 300000
+
+  - id: c08
+    type: cross
+    question: "把手机投屏到电脑需要哪几步？"
+    expect_keypoints:
+      - ["相同网络", "同一网络", "同一个网络", "连到相同"]
+      - ["乐播投屏"]
+      - ["二维码", "扫码"]
+      - ["投屏码", "投屏密码"]
+    expect_time: "14:22"
+    tolerance_ms: 180000
+
+  - id: c09
+    type: cross
+    question: "抓包插件里，对 gzip 压缩的响应体是怎么处理的？"
+    expect_keypoints:
+      - ["gzip"]
+      - ["GzipSource"]
+      - ["Buffer", "buffer"]
+    expect_time: "12:59"
+    tolerance_ms: 180000
+
+  - id: c10
+    type: cross
+    question: "从笔记的更新过程看，第 3 种方法（方法 Hook 打印调用）下面补充了哪些关键提醒？"
+    expect_keypoints:
+      - ["Hook"]
+      - ["SD卡", "SD 卡"]
+      - ["栈信息", "栈"]
+    expect_time: "30:54"
+    tolerance_ms: 240000
+
+  # ------------------------------------------------------------------ 视觉型
+  - id: v01
+    type: visual
+    question: "uiautomatorviewer 的 Node Detail 面板里，那个 FrameLayout 的 resource-id 是什么？"
+    expect_keypoints:
+      - ["folder_header"]
+      - ["com.miui.home"]
+    expect_time: "09:48"
+    tolerance_ms: 120000
+
+  - id: v02
+    type: visual
+    question: "uiautomatorviewer.bat 的属性窗口里，「起始位置」填的是什么路径？"
+    expect_keypoints:
+      - ["studioSdk"]
+      - ["tools\\bin", "tools/bin", "bin"]
+    expect_time: "08:20"
+    tolerance_ms: 120000
+
+  - id: v03
+    type: visual
+    question: "课件里乐播投屏「手机投电脑」列出的操作步骤有哪几条？"
+    expect_keypoints:
+      - ["相同网络", "同一个网络", "同一网络"]
+      - ["乐播投屏"]
+      - ["二维码", "扫码"]
+      - ["投屏码"]
+    expect_time: "14:22"
+    tolerance_ms: 180000
+
+  - id: v04
+    type: visual
+    question: "Android Device Monitor 里打开的那个方法追踪 trace 文件，文件名是什么？"
+    expect_keypoints:
+      - ["ddms"]
+      - ["trace"]
+    expect_time: "02:20"
+    tolerance_ms: 180000
+
+  - id: v05
+    type: visual
+    question: "演示 App 的 AES 代码里，Cipher.getInstance 用的完整字符串是什么？"
+    expect_keypoints:
+      - ["AES/CBC/PKCS5Padding", "AES/CBC", "PKCS5Padding"]
+    expect_time: "12:28"
+    tolerance_ms: 120000
+
+  - id: v06
+    type: visual
+    question: "encryptstack 这个 Hook 模块的 AndroidManifest 里，靠哪个 meta-data 把自己声明成 Xposed 模块？"
+    expect_keypoints:
+      - ["xposedmodule"]
+      - ["meta-data", "metadata"]
+    expect_time: "21:12"
+    tolerance_ms: 120000
+
+  - id: v07
+    type: visual
+    question: "Hook 打印出来的加密信息文件叫什么名字？保存在手机的哪个目录下？"
+    expect_keypoints:
+      - ["EncryptStack"]
+      - ["com.kejian.one.txt", "kejian.one.txt"]
+    expect_time: "23:54"
+    tolerance_ms: 180000
+
+  - id: v08
+    type: visual
+    question: "CLogUtils 的代码注释里说 log 最多多长？是用什么方法解决的？"
+    expect_keypoints:
+      - ["4*1024", "4 * 1024", "4096", "1024"]
+      - ["InfiniteLog"]
+    expect_time: "22:36"
+    tolerance_ms: 120000
+
+  - id: v09
+    type: visual
+    question: "课件截图中，输入框里输入的明文是什么？它经过加密后文本框里显示的 MD5 值是什么？"
+    expect_keypoints:
+      - ["1234"]
+      - ["296506902c693b458707ad6f7e24a544", "296506"]
+    expect_time: "10:24"
+    tolerance_ms: 180000
+
+  - id: v10
+    type: visual
+    question: "BuildProp Enhancer 插件界面上列出的与调试相关的属性有哪些？"
+    expect_keypoints:
+      - ["ro.debuggable"]
+      - ["ro.secure"]
+      - ["EnableViewServer"]
+      - ["TurnOn/Off Debug", "TurnOn", "Debug"]
+    expect_time: "06:30"
+    tolerance_ms: 120000
+
+  # ------------------------------------------------------------------ 全局型
+  - id: g01
+    type: global
+    question: "这门课一共介绍了几种关键代码定位方式？分别是什么？"
+    expect_keypoints:
+      - ["四种", "4种", "4 种", "四类"]
+      - ["DDMS"]
+      - ["uiautomatorviewer"]
+      - ["Hook"]
+      - ["搜索", "关键字"]
+
+  - id: g02
+    type: global
+    question: "这门课一共涉及哪几种加密算法？"
+    expect_keypoints:
+      - ["native", "Native"]
+      - ["Base64", "base64"]
+      - ["MD5", "md5"]
+      - ["AES"]
+      - ["DES"]
+
+  - id: g03
+    type: global
+    question: "为了做 Hook 调试，老师用了/提到了哪些 Xposed 相关的工具和模块？"
+    expect_keypoints:
+      - ["EdXposed", "edxposed"]
+      - ["Xposed"]
+      - ["BuildProp Enhancer", "BuildProp"]
+      - ["XSharedPreferences"]
+
+  - id: g04
+    type: global
+    question: "从拿到一个加固 App 到定位到关键代码，这门课给出的整体分析流程是什么？"
+    expect_keypoints:
+      - ["反编译", "解包"]
+      - ["定位", "查找"]
+      - ["Hook"]
+      - ["加密"]
+
+  - id: g05
+    type: global
+    question: "老师讲的「方法一 / 方法二 / 方法三 / 方法四」分别对应哪种定位手段？"
+    expect_keypoints:
+      - ["DDMS", "方法追踪"]
+      - ["uiautomatorviewer"]
+      - ["Hook"]
+      - ["搜索", "关键字"]
+
+  - id: g06
+    type: global
+    question: "Hook 打印时，同一个数据会输出哪些编码形式？这么做是为了什么？"
+    expect_keypoints:
+      - ["UTF-8", "UTF8", "U8", "utf-8"]
+      - ["Base64", "base64"]
+      - ["16进制", "十六进制", "hex"]
+      - ["定位", "方便", "查看"]
+
+  - id: g07
+    type: global
+    question: "演示 App 的 AES 加密中，参与初始化的三个参数分别是什么值？"
+    expect_keypoints:
+      - ["654321"]
+      - ["0102030405060708"]
+      - ["CBC"]
+      - ["PKCS5Padding"]
+
+  - id: g08
+    type: global
+    question: "老师那份定位笔记里，第 1 项和第 2 项分别记的是什么？"
+    expect_keypoints:
+      - ["DDMS"]
+      - ["uiautomatorviewer"]
+
+  - id: g09
+    type: global
+    question: "为了能让 Hook 正常工作，encryptstack 模块声明了哪些权限？"
+    expect_keypoints:
+      - ["SYSTEM_ALERT_WINDOW"]
+      - ["SYSTEM_OVERLAY_WINDOW"]
+      - ["WRITE_EXTERNAL_STORAGE", "READ_EXTERNAL_STORAGE"]
+      - ["REORDER_TASKS", "ACTION_MANAGE_OVERLAY_PERMISSION"]
+
+  - id: g10
+    type: global
+    question: "这门课演示了两个工程（kechengProject 和 encryptstack），它们各自扮演什么角色？"
+    expect_keypoints:
+      - ["被Hook", "被 Hook", "目标", "加密"]
+      - ["Hook", "Xposed"]
