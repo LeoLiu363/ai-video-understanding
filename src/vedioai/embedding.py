@@ -108,6 +108,33 @@ class Embedder:
         return np.vstack(out) if out else np.zeros((0, 1024), dtype=np.float32)
 
 
+# 已知故障特征：Ollama 自带的 CUDA 运行时比显卡驱动新时，GPU 后端起不来
+# （新版 llama.cpp 的 PDL 内核探测失败）。原始报错对用户毫无指向性，
+# 这里翻译成可照做的指引——这个坑值得写死，因为排查成本很高。
+_OLLAMA_GPU_FAILURE_HINTS = (
+    "device kernel image is invalid",
+    "ggml_cuda_kernel_can_use_pdl",
+    "0xc0000409",
+)
+
+
+def explain_ollama_failure(status_code: int, body: str, base_url: str) -> str:
+    """把 Ollama 的原始报错翻译成可执行的指引；无法归类时返回空串。"""
+    if not any(hint in body for hint in _OLLAMA_GPU_FAILURE_HINTS):
+        return ""
+    return (
+        f"Ollama 的 GPU 后端启动失败（{base_url} 返回 {status_code}）。\n"
+        "  这是「Ollama 自带的 CUDA 运行时比显卡驱动新」的典型现象，"
+        "与模型、与本项目都无关。\n"
+        "  注意：改用 cuda_v12 不解决问题（Ollama 默认用的就是它），"
+        "所以别去折腾库版本。\n"
+        "  解法：强制 CPU（bge-m3 走 CPU 完全够用），然后重启 Ollama：\n"
+        "    [Environment]::SetEnvironmentVariable('OLLAMA_LLM_LIBRARY','cpu','User')\n"
+        "  重启必须让 Ollama 进程真正重启以继承该变量——在已开着的终端里"
+        "用 Start-Process 启动不会生效。"
+    )
+
+
 class OllamaEmbedder:
     """通过 Ollama 的 HTTP 接口做嵌入，复用机器上已有的 GGUF 模型。
 
@@ -203,7 +230,11 @@ class OllamaEmbedder:
                     f"{self.base_url}/api/embed",
                     json={"model": self.model, "input": batch},
                 )
-                resp.raise_for_status()
+                if resp.status_code >= 400:
+                    hint = explain_ollama_failure(resp.status_code, resp.text, self.base_url)
+                    if hint:
+                        raise RuntimeError(hint)
+                    resp.raise_for_status()
                 vecs = np.asarray(resp.json().get("embeddings") or [], dtype=np.float32)
                 if vecs.ndim != 2 or len(vecs) != len(batch):
                     raise RuntimeError(

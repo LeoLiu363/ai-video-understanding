@@ -22,7 +22,9 @@ from evals.run_eval import normalize, score_citation, score_keypoints  # noqa: E
 from vedioai.context import build_full_prefix, build_outline_prefix, estimate_tokens  # noqa: E402
 from vedioai.ingest.media import MediaInfo, StreamInfo, pick_split_points, plan_proxy  # noqa: E402
 from vedioai.ingest.segment import attach_parents, build_chapters, build_chunks  # noqa: E402
-from vedioai.config import RetrieveConfig  # noqa: E402
+from vedioai.config import Config, RetrieveConfig  # noqa: E402
+from vedioai.embedding import explain_ollama_failure  # noqa: E402
+from vedioai.selfcheck import check_embedding  # noqa: E402
 from vedioai.retrieve import Retriever  # noqa: E402
 from vedioai.schema import Segment, Slide, Video, VideoStatus, hms_to_ms, ms_to_hms  # noqa: E402
 from vedioai.store import Store, query_terms, tokenize_zh  # noqa: E402
@@ -575,3 +577,49 @@ def test_score_citation_tolerance():
     assert near.status == "ok"
     far = score_citation([{"start_ms": 200_000}], "00:30", 90_000)
     assert far.status == "wrong"
+
+
+# ------------------------------------------------- Ollama 嵌入与故障诊断
+
+
+def test_ollama_gpu_failure_is_explained():
+    """Ollama 的 GPU 报错必须翻译成可照做的指引。
+
+    这个坑排查成本极高（报错文本完全不提解决办法，还容易被误判成
+    「模型选错」或「选错了 cuda 库版本」），所以把「强制 CPU」的解法写进
+    异常信息里，避免下次又要从头查一遍。
+    """
+    body = (
+        '{"error":"llama-server process has terminated: exit status 0xc0000409: '
+        'The system detected an overrun of a stack-based buffer in this application.: '
+        'CUDA error: device kernel image is invalid"}'
+    )
+    msg = explain_ollama_failure(500, body, "http://127.0.0.1:11434")
+    assert "OLLAMA_LLM_LIBRARY" in msg
+    assert "cpu" in msg
+    # 必须点明「改用 cuda_v12 没用」，否则会把人引向错误方向
+    assert "cuda_v12" in msg
+
+
+def test_ollama_unrelated_error_not_misdiagnosed():
+    """无关报错不能被误判成 GPU 故障。"""
+    assert explain_ollama_failure(500, '{"error":"model not found"}', "http://x") == ""
+    assert explain_ollama_failure(404, "not found", "http://x") == ""
+
+
+def test_check_embedding_skipped_when_disabled():
+    """嵌入是可选组件：未启用时不该作为检查项，更不该算失败。"""
+    cfg = Config()
+    cfg.retrieve = RetrieveConfig(embed_backend="none")
+    assert check_embedding(cfg) is None
+
+
+def test_check_embedding_skipped_when_backend_unreachable():
+    """后端探不通时返回 None（跳过），而不是报「失败」。
+
+    嵌入未启用是合法状态，不该让 check --live 变红——否则每次都会误导人。
+    """
+    cfg = Config()
+    cfg.retrieve = RetrieveConfig(embed_backend="ollama")
+    cfg.retrieve.ollama_url = "http://127.0.0.1:1"  # 必然连不上
+    assert check_embedding(cfg) is None

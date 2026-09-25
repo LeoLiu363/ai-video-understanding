@@ -128,9 +128,43 @@ def _probe_chat(name: str, api_key: str, base_url: str, model: str) -> CheckResu
     return CheckResult(name, False, f"HTTP {resp.status_code}：{resp.text[:200]}")
 
 
+def check_embedding(cfg: Config) -> CheckResult | None:
+    """真正编码一句话，验证本地嵌入后端可用。
+
+    为什么不能只看 `/api/tags` 里有没有模型：模型「已拉取」和「能加载」是两回事。
+    新版 Ollama 在旧显卡驱动上，模型名明明在列表里，一旦真正加载就崩
+    （CUDA 报错）。只看列表会给出「可用」的错误结论，而实际入库时会白跑很久
+    才发现向量根本没建起来。
+
+    嵌入是可选组件，未启用时返回 None（不作为检查项，也不算失败）。
+    """
+    from .embedding import build_embedder
+
+    try:
+        embedder = build_embedder(cfg)
+    except Exception as exc:  # noqa: BLE001
+        return CheckResult("本地嵌入", False, f"构造嵌入后端失败：{exc}")
+
+    if not embedder.available:
+        return None
+
+    backend = type(embedder).__name__
+    try:
+        vecs = embedder.encode(["连通性测试"])
+    except Exception as exc:  # noqa: BLE001
+        return CheckResult("本地嵌入", False, f"{backend}：{exc}")
+
+    if vecs.ndim != 2 or vecs.shape[0] != 1 or vecs.shape[1] < 1:
+        return CheckResult("本地嵌入", False, f"{backend} 返回向量形状异常：{vecs.shape}")
+    return CheckResult("本地嵌入", True, f"{backend} 可用（维度 {vecs.shape[1]}）")
+
+
 def run_live_checks(cfg: Config) -> list[CheckResult]:
-    return [
+    candidates = [
         check_asr(cfg, cfg.media.ffmpeg),
         check_llm(cfg),
         check_vision(cfg),
+        check_embedding(cfg),
     ]
+    # None = 可选组件未启用，不作为检查项
+    return [r for r in candidates if r is not None]
