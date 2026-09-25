@@ -291,7 +291,7 @@ def cmd_notes(args, cfg) -> int:
         sys.stdout.write(f"\r{message:<50}")
         sys.stdout.flush()
 
-    result = service.generate(video_id, progress=on_progress)
+    result = service.generate(video_id, progress=on_progress, force=args.force)
     sys.stdout.write("\n")
 
     if args.out:
@@ -620,6 +620,11 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("notes", help="生成学习文档")
     p.add_argument("video")
     p.add_argument("--out", help="输出 Markdown 路径")
+    p.add_argument(
+        "--force",
+        action="store_true",
+        help="即使多数章节生成失败也覆盖已有 notes.md（默认保留旧文档，避免用残次品盖掉良品）",
+    )
     p.set_defaults(func=cmd_notes)
 
     p = sub.add_parser("serve", help="启动本地 Web UI")

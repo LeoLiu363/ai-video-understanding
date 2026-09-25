@@ -59,6 +59,7 @@ class NotesService:
         video_id: str,
         *,
         save: bool = True,
+        force: bool = False,
         progress=None,
     ) -> NotesResult:
         video = self.store.get_video(video_id)
@@ -83,13 +84,17 @@ class NotesService:
 
         # ---- 每章一节
         sections: list[str] = []
+        failed: list[str] = []
         for i, chapter in enumerate(chapters, start=1):
             if progress:
                 progress(i, len(chapters) + 1, f"生成第 {i}/{len(chapters)} 章笔记")
             body_chunks = by_chapter.get(chapter.chapter_id, [])
             if not body_chunks:
                 continue
-            sections.append(self._chapter_section(chapter, body_chunks, usage))
+            section, ok = self._chapter_section(chapter, body_chunks, usage)
+            if not ok:
+                failed.append(chapter.chapter_id)
+            sections.append(section)
 
         # ---- 术语表
         concepts = self._concepts_table(chunks)
@@ -112,6 +117,37 @@ class NotesService:
             out_dir = self.cfg.library_dir / video_id
             out_dir.mkdir(parents=True, exist_ok=True)
             path = out_dir / "notes.md"
+
+            # 保护一：多数章节失败时**不覆盖**已有文档。
+            #
+            # 真实事故：DeepSeek 余额耗尽（HTTP 402）导致 23 章全部生成失败，
+            # 但代码照常写盘——一份 74154 字、带时间戳的完整笔记被 28160 字的
+            # 降级版（章节笔记退化成章节摘要）覆盖了。data/ 在 .gitignore 里，
+            # 没有版本历史可回滚，好内容当场丢失。
+            #
+            # 这类「失败时用残次品覆盖良品」的 bug 有个共同点：它把一次可降级的
+            # 失败升级成不可逆的数据损失，而且留下的文件看起来是正常的——
+            # 用户不会怀疑一份格式正确的笔记缺了内容。
+            #
+            # 注意 sections 为空也算降级：那说明章节一条都没写出来，
+            # 落盘的只有开头，同样不该盖掉已有文档。
+            degraded = bool(chapters) and (
+                not sections or len(failed) >= max(3, len(sections) // 2 + 1)
+            )
+            if degraded and path.exists() and not force:
+                log.warning(
+                    "本章 %d/%d 章生成失败（多为额度/网络问题），已保留原有 notes.md 不覆盖；"
+                    "如需强制写入请加 --force",
+                    len(failed),
+                    max(len(sections), len(chapters)),
+                )
+                return NotesResult(markdown=markdown, path=path, usage=usage)
+
+            # 保护二：覆盖前先留一份上一版。即使判断失误，也有可回退的东西。
+            if path.exists():
+                backup = path.with_suffix(".md.bak")
+                backup.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+
             path.write_text(markdown, encoding="utf-8")
             log.info("学习文档已写入 %s", path)
 
@@ -184,11 +220,15 @@ class NotesService:
             note = reply.text
         except LLMError as exc:
             log.warning("生成章节笔记失败 %s：%s", chapter.chapter_id, exc)
-            # 失败时至少保留原文，不要把这一章丢掉
+            # 失败时至少保留原文，不要把这一章丢掉。
+            # 但要如实返回 ok=False——调用方据此判断整份文档是否已被降级，
+            # 而不是把「摘要顶替笔记」当成正常产出写盘。
             note = chapter.summary or transcript[:3000]
+            note = _strip_duplicate_heading(note, title)
+            return f"\n---\n\n## {chapter.idx + 1}. {title}\n\n`{span}`\n\n{note.strip()}", False
 
         note = _strip_duplicate_heading(note, title)
-        return f"\n---\n\n## {chapter.idx + 1}. {title}\n\n`{span}`\n\n{note.strip()}"
+        return f"\n---\n\n## {chapter.idx + 1}. {title}\n\n`{span}`\n\n{note.strip()}", True
 
     # --------------------------------------------------------------- 组装辅助
 

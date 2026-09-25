@@ -163,7 +163,12 @@ def reocr_slides(
         if progress:
             progress(i, len(slides), f"重跑 OCR {i}/{len(slides)}")
         image_path = extract_hd_frame(
-            ffmpeg, src, out_dir, slide.start_ms, width=width, idx=slide.idx
+            ffmpeg,
+            src,
+            out_dir,
+            representative_ms(slide.start_ms, slide.end_ms),
+            width=width,
+            idx=slide.idx,
         )
         slide.image_path = str(image_path)
         slide.ocr_text = _ocr_image(ocr, image_path)
@@ -172,6 +177,35 @@ def reocr_slides(
         progress(len(slides), len(slides), f"重跑 OCR {len(slides)}/{len(slides)}")
     clear_hd_frames(out_dir, keep={s.image_path for s in slides})
     return slides
+
+
+def _nearest_frame(frames: list[_Frame], at_ms: int) -> _Frame:
+    """采样帧里离 ``at_ms`` 最近的一张（``frames`` 按时间升序）。"""
+    best = frames[0]
+    for frame in frames[1:]:
+        if abs(frame.ms - at_ms) < abs(best.ms - at_ms):
+            best = frame
+    return best
+
+
+def representative_ms(start_ms: int, end_ms: int) -> int:
+    """代表帧的抽取时刻：取幻灯片区间的**中点**，而不是区间起点。
+
+    为什么不能用起点：变化检测跑在 ``sample_interval_ms`` 的采样帧上，而触发
+    换页的那一帧往往正处在**切换过程中**——窗口刚打开、正文还没渲染出来，
+    屏幕上只有标题栏。本课实测：Notepad++ 在 30:54 那一帧笔记正文还是空白
+    （OCR 只有 104 字），一秒后才出现正文。代表帧若固定取区间起点，整段笔记
+    （4 种关键代码定位方法及其补充提醒）就永远进不了库，跨段题自然答不上。
+
+    取中点还有两个好处：
+    1. 分组规则保证组内任意一帧与首帧的灰度差都不超过 ``change_ratio``，
+       所以中点必定落在同一页内，只是渲染得更完整，不会串页；
+    2. 它只依赖库里已存的 ``start_ms``/``end_ms``，``vedioai reocr`` 能复算出
+       同一张图，不会出现「重跑 OCR 和首次入库结果不一致」。
+    """
+    if end_ms <= start_ms:
+        return start_ms
+    return (start_ms + end_ms) // 2
 
 
 def detect_slides(
@@ -222,10 +256,13 @@ def detect_slides(
     for gi, group in enumerate(groups):
         start_ms = group[0].ms
         end_ms = groups[gi + 1][0].ms if gi + 1 < len(groups) else max(duration_ms, start_ms + 1000)
+        # 代表帧取区间中点：起点那帧常是「切换还没渲染完」的空白帧（见函数注释）
+        rep_ms = representative_ms(start_ms, end_ms)
+        rep_frame = _nearest_frame(group, rep_ms)
 
         if ocr is None:
             # 不做 OCR 时保留变化检测那一遍的小图，省磁盘
-            image_path = group[0].path
+            image_path = rep_frame.path
             ocr_text = ""
         else:
             if progress:
@@ -235,7 +272,7 @@ def detect_slides(
             # 同一帧喂 960 会把 "uiautomatorviewer.bat" 读成
             # "uiautomatoniewer.bet"，喂原图就对。按需抽帧单张约 0.2s。
             image_path = extract_hd_frame(
-                ffmpeg, src, out_dir, start_ms, width=cfg.ocr_width or None, idx=gi
+                ffmpeg, src, out_dir, rep_ms, width=cfg.ocr_width or None, idx=gi
             )
             ocr_text = _ocr_image(ocr, image_path)
 
@@ -246,7 +283,7 @@ def detect_slides(
                 end_ms=end_ms,
                 image_path=str(image_path),
                 ocr_text=ocr_text,
-                phash=group[0].phash,
+                phash=rep_frame.phash,
             )
         )
 

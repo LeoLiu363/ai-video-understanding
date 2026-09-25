@@ -245,6 +245,15 @@ def render_report(summary: dict, outcomes: list[QuestionOutcome], cfg=None) -> s
         "",
         f"生成时间：{datetime.now():%Y-%m-%d %H:%M:%S}",
         "",
+    ]
+    if summary.get("invalid_run"):
+        # 放在最顶部：报告一旦生成就会被引用，不能让它看起来像一次有效测量
+        lines += [
+            "> ⚠️ **本次运行无效，分数不可用于对比。**",
+            f"> {summary.get('invalid_reason', '')}",
+            "",
+        ]
+    lines += [
         "## 总览",
         "",
         "| 指标 | 值 |",
@@ -377,12 +386,30 @@ def main(args, cfg) -> int:
         "\n".join(json.dumps(o.to_dict(), ensure_ascii=False) for o in outcomes),
         encoding="utf-8",
     )
+
+    # 大面积调用失败时，这次的分数毫无意义，不能当成一次有效测量。
+    #
+    # 真实事故：DeepSeek 余额耗尽（HTTP 402），40 题里 39 题报错，总分 0.025，
+    # 但报告照常生成、照常打印。留下的 summary.json 与一份真实回退的测量在格式上
+    # 完全一样——后来的人拿它做基线对比，会以为系统坏了，去排查根本不是原因的地方。
+    #
+    # 所以：仍然落盘（保留现场供排查），但把结论标成无效，让人一眼看出别用。
+    errored = summary.get("failures") or []
+    if outcomes and len(errored) >= max(1, len(outcomes) // 2):
+        summary["invalid_run"] = True
+        summary["invalid_reason"] = (
+            f"{len(errored)}/{len(outcomes)} 题调用失败（多为额度/网络问题），本次分数不可用于对比"
+        )
+        log.warning("本次评估 %d/%d 题失败，标记为无效运行", len(errored), len(outcomes))
+
     (out_dir / "summary.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     (out_dir / "report.md").write_text(render_report(summary, outcomes), encoding="utf-8")
 
     print(f"\n总分 {summary['overall']}　by_type {summary['by_type']}")
+    if summary.get("invalid_run"):
+        print(f"⚠️  本次运行无效：{summary.get('invalid_reason', '')}")
     if notes_hit is not None:
         print(f"笔记要点命中 {summary['notes_hit']}")
     print(f"未引用 {summary['no_citation_rate']}　引用错位 {summary['wrong_citation_rate']}")

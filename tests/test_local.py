@@ -580,6 +580,43 @@ def test_score_citation_tolerance():
     assert far.status == "wrong"
 
 
+def test_build_citations_keeps_late_cited_positions():
+    """引用截断不能按时间「留早不留晚」：结论常常落在课程末尾。
+
+    复现 c01：模型在正文里标了 10 个位置，答案落定在最后那个（30:48）上。
+    早期实现先按时间排序再截断到 8 条，恰好把最后那个位置挤掉，引用被判成
+    「指错位置」（有引用但都指错，比不引用更糟）。
+    """
+    from vedioai.ask import AskService
+    from vedioai.schema import Chunk
+
+    def chunk(i: int) -> Chunk:
+        start = i * 60_000
+        return Chunk(
+            chunk_id=f"v1-c{i:04d}",
+            idx=i,
+            start_ms=start,
+            end_ms=start + 60_000,
+            text=f"第 {i} 分钟",
+            title=f"t{i}",
+            slide_idxs=[],
+        )
+
+    chunks = [chunk(i) for i in range(32)]
+    # 模型正文里出现的时间戳：前 9 个是取证过程，最后一个是结论落定处
+    answer_text = "（讲师在 [30:48] 明确说一共四种）" + "".join(
+        f"[{i:02d}:00]" for i in (0, 1, 2, 3, 4, 5, 6, 7, 8)
+    )
+
+    service = AskService.__new__(AskService)  # 只测纯逻辑，不建依赖
+    got = service._build_citations("v1", [], chunks, [], answer_text)
+
+    assert len(got) <= 12
+    assert any(abs(c.start_ms - 30 * 60_000) <= 300_000 for c in got), (
+        "时间靠后的引用被截掉了"
+    )
+
+
 # ------------------------------------------------- Ollama 嵌入与故障诊断
 
 
@@ -890,6 +927,113 @@ def test_prefix_truncates_when_course_is_too_long():
     assert "已截断" in prefix, "截断必须告知模型，否则它会以为材料完整"
 
 
+def test_notes_does_not_overwrite_good_doc_when_llm_fails(tmp_path: Path):
+    """多数章节生成失败时，不得用降级文档覆盖已有的完整笔记。
+
+    真实事故：DeepSeek 余额耗尽（HTTP 402）导致 23 章全部失败，但代码照常写盘——
+    一份 74154 字、带时间戳的完整笔记被 28160 字的降级版（章节笔记退化成章节摘要）
+    覆盖。data/ 在 .gitignore 里，没有版本历史可回滚，好内容当场丢失。
+    这种 bug 的共同点是把可降级的失败升级成不可逆损失，且留下的文件看起来正常。
+    """
+    from vedioai.llm.client import LLMError
+    from vedioai.notes import NotesService
+
+    class FailingLLM:
+        def chat(self, *a, **kw):
+            raise LLMError("HTTP 402: Insufficient Balance")
+
+        def close(self):
+            pass
+
+    cfg = Config()
+    cfg.data_dir = tmp_path / "data"
+    store = Store(cfg.db_path)
+    vid = "v1"
+    store.upsert_video(
+        Video(video_id=vid, path="x.mp4", title="t", duration_ms=120_000, status=VideoStatus.READY)
+    )
+    chunks = [make_chunk(vid, i, i * 10_000, i * 10_000 + 10_000, f"第{i}段正文") for i in range(8)]
+    chapter_ids = [f"{vid}-h{i:04d}" for i in range(4)]
+    # 块的 parent_id 决定它归到哪一章——不设的话章节取不到内容，整份文档只剩开头
+    for i, chunk in enumerate(chunks):
+        chunk.parent_id = chapter_ids[i // 2]
+    store.replace_chunks(vid, chunks)
+    store.replace_chapters(
+        vid,
+        [
+            Chapter(
+                chapter_id=chapter_ids[i],
+                idx=i,
+                start_ms=i * 20_000,
+                end_ms=i * 20_000 + 20_000,
+                title=f"第{i}章",
+                summary=f"第{i}章的摘要",
+                chunk_ids=[chunks[2 * i].chunk_id, chunks[2 * i + 1].chunk_id],
+            )
+            for i in range(4)
+        ],
+    )
+
+    # 先放一份「良品」旧文档
+    out_dir = cfg.library_dir / vid
+    out_dir.mkdir(parents=True, exist_ok=True)
+    good = out_dir / "notes.md"
+    good.write_text("这是一份完整的旧笔记，含时间戳 [12:34] 与要点", encoding="utf-8")
+
+    service = NotesService(cfg, store, FailingLLM())
+    service.generate(vid)
+
+    assert good.read_text(encoding="utf-8") == "这是一份完整的旧笔记，含时间戳 [12:34] 与要点", (
+        "章节全部失败时不得覆盖已有文档"
+    )
+    assert not (out_dir / "notes.md.bak").exists(), "没写盘就不该留备份"
+
+    # --force 时才允许覆盖（并留下备份）
+    service.generate(vid, force=True)
+    assert "这是一份完整的旧笔记" in (out_dir / "notes.md.bak").read_text(encoding="utf-8")
+    assert "第0章的摘要" in good.read_text(encoding="utf-8"), "降级版应含摘要兜底内容"
+    store.close()
+
+
+def test_eval_run_marked_invalid_when_most_questions_error():
+    """大面积调用失败时，报告必须自我标记为无效。
+
+    真实事故：余额耗尽（HTTP 402）导致 40 题里 39 题报错，总分 0.025，
+    但报告照常生成、照常打印。留下的 summary.json 与一次真实回退的测量格式完全
+    一样——后来的人拿它做基线，会以为系统坏了，去排查根本不是原因的地方。
+    """
+    from vedioai.eval_runner import QuestionOutcome, render_report, summarize
+
+    def outcome(qid: str, error: str) -> QuestionOutcome:
+        from vedioai.eval_runner import CitationResult, KeypointResult
+
+        o = QuestionOutcome(
+            qid=qid,
+            qtype="factual",
+            question="q",
+            score=0.0,
+            keypoints=KeypointResult(total=1, hit=0),
+            citation=CitationResult(status="missing", score=0.5),
+            answer="",
+            error=error,
+        )
+        return o
+
+    outcomes = [outcome(f"f{i:02d}", "调用失败：HTTP 402 Insufficient Balance") for i in range(10)]
+    summary = summarize(outcomes, None)
+    assert len(summary["failures"]) == 10
+
+    # 复现 main 里的判定逻辑
+    errored = summary.get("failures") or []
+    assert len(errored) >= max(1, len(outcomes) // 2), "全部报错必须触发无效标记"
+
+    summary["invalid_run"] = True
+    summary["invalid_reason"] = "10/10 题调用失败"
+    report = render_report(summary, outcomes)
+    assert "本次运行无效" in report
+    assert report.index("本次运行无效") < report.index("## 总览"), "警示必须在报告最顶部"
+
+
 def test_collect_context_separates_ground_truth_from_summaries(store: Store):
     """摘要（LLM 写的）不能进证据池，否则等于用幻觉校验幻觉。
 
@@ -1066,4 +1210,52 @@ def test_reocr_slides_refreshes_text_and_prunes_old_frames(monkeypatch, tmp_path
     assert widths == [None], "回补也要用原始分辨率"
     assert not stale.exists(), "不再被引用的旧高清帧应被清理"
     assert Path(out[0].image_path).exists(), "新帧必须留下"
+
+
+def test_representative_ms_uses_span_middle():
+    """代表帧取区间中点：换页瞬间那帧常常是空白/半渲染，取起点会丢正文。"""
+    from vedioai.ingest.slides import representative_ms
+
+    assert representative_ms(30 * 60_000 + 54_000, 31 * 60_000 + 22_000) == 31 * 60_000 + 8_000
+    assert representative_ms(1000, 3000) == 2000
+    # 退化区间（end<=start）不能算出越界时刻
+    assert representative_ms(5000, 5000) == 5000
+    assert representative_ms(5000, 4000) == 5000
+
+
+def test_detect_slides_extracts_representative_frame_at_span_middle(monkeypatch, tmp_path):
+    """变化检测命中的那一帧常是切换瞬间；高清代表帧要取区间中点而非起点。"""
+    import numpy as np
+
+    from vedioai.ingest import slides as S
+    from vedioai.config import SlideConfig
+
+    # 三帧：0ms 暗（切换瞬间，无文字），2000ms 亮（正文渲染出来），4000ms 暗（换页）
+    def frame(ms, value):
+        gray = np.full((36, 64), float(value), np.float32)
+        path = tmp_path / f"f_{ms:06d}.jpg"
+        path.write_bytes(b"x")
+        return S._Frame(ms=ms, path=path, gray=gray, phash="0" * 16)
+
+    frames = [frame(0, 0), frame(2000, 255), frame(4000, 0)]
+    monkeypatch.setattr(S, "extract_frames", lambda *a, **kw: frames)
+
+    at_times: list[int] = []
+
+    def fake_extract(ffmpeg, src, dst, at_ms, width=960, **kw):
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_bytes(b"x")
+        at_times.append(at_ms)
+        return dst
+
+    monkeypatch.setattr(S, "extract_frame", fake_extract)
+    monkeypatch.setattr(S, "_get_ocr", lambda: object())
+    monkeypatch.setattr(S, "_ocr_image", lambda ocr, path: "课件文字")
+
+    cfg = SlideConfig(sample_interval_ms=2000)
+    got = S.detect_slides("ffmpeg", tmp_path / "v.mp4", 6000, tmp_path / "out", cfg)
+
+    assert [s.start_ms for s in got] == [0, 2000, 4000]
+    # 第一页区间 [0,2000)，中点 1000；第三页是最后一页，区间 [4000,6000)，中点 5000
+    assert at_times == [1000, 3000, 5000], "代表帧不能固定取区间起点"
 

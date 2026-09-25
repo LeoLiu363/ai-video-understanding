@@ -32,6 +32,10 @@ _TS_PATTERN = re.compile(r"\[(?:时间\s*)?(\d{1,2}:\d{2}(?::\d{2})?)\]")
 _GLOBAL_HINTS = ("一共", "几种", "哪些", "总结", "概括", "整体", "全部", "整个课程", "贯穿", "对比", "比较", "有变化")
 _VISUAL_HINTS = ("这张图", "画面", "板书", "ppt", "幻灯", "图里", "图表", "写的什么", "屏幕")
 
+# 回答里最多带多少条可跳转引用。给得比 8 宽一些：跨段问题会在多个位置取证，
+# 卡得太紧就会把「结论落定」的那一段（通常时间靠后）截掉。
+_MAX_CITATIONS = 12
+
 # 前缀超过这个 token 预算才退化到大纲前缀
 PREFIX_TOKEN_BUDGET = 400_000
 
@@ -276,10 +280,16 @@ class AskService:
                 picked.append(chunk)
 
         for hit in hits:
-            if hit.chunk.chunk_id not in seen and len(picked) < 8:
+            if hit.chunk.chunk_id not in seen and len(picked) < _MAX_CITATIONS:
                 seen.add(hit.chunk.chunk_id)
                 picked.append(hit.chunk)
 
+        # 先截断、再按时间排序。list 的顺序就是优先级：前面是模型自己在正文里
+        # 标的时间戳（它标在哪就说明在哪几处找过答案），后面才是检索命中的兜底。
+        # 早期实现先排序后截断，等于按时间「留早不留晚」——模型把结论落在课程
+        # 末尾时（c01 的笔记在 [30:48] 才写全 4 种方法），这个位置反而被挤掉，
+        # 引用就被判成指错位置了。
+        picked = picked[:_MAX_CITATIONS]
         picked.sort(key=lambda c: c.start_ms)
         return [
             Citation(
@@ -289,7 +299,7 @@ class AskService:
                 slide_idxs=c.slide_idxs,
                 chapter_title=(chapter_of.get(c.chunk_id).title if chapter_of.get(c.chunk_id) else ""),
             )
-            for c in picked[:8]
+            for c in picked
         ]
 
 
