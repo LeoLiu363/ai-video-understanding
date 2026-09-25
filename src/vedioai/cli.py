@@ -321,7 +321,7 @@ def cmd_reindex(args, cfg) -> int:
     from .pipeline import reindex_videos
 
     store = Store(cfg.db_path)
-    embedder = build_embedder(cfg)
+    embedder, reranker = build_local_models(cfg)
 
     if not embedder.available:
         reason = getattr(embedder, "reason", "")

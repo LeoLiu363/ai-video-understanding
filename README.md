@@ -225,6 +225,40 @@ vedioai reindex [video_id]                    # 后装嵌入模型后重建向�
 
 重排**必须用 fp32**：int8 量化会改变 top-1 排序——而排序器量化的恰好就是这个「第一名」。
 
+### 已经有本地 Ollama 的话，不用再下一份 ONNX
+
+本机 Ollama 已拉过 `bge-m3` 时，直接把嵌入指过去，省掉一份 ONNX 权重：
+
+```yaml
+retrieve:
+  embed_backend: ollama        # auto | onnx | ollama | none
+  ollama_url: http://127.0.0.1:11434
+  ollama_embed_model: bge-m3
+```
+
+`auto`（默认）先找 ONNX，找不到再退回 Ollama，都没有才退化为纯关键词。
+
+**已知坑：新版 Ollama 在旧显卡驱动上会连 GPU 后端一起崩。** 现象是
+`/api/embed` 与 `/api/embeddings` 都返回 500，报
+`CUDA error: device kernel image is invalid`，日志里另有
+`llama-server GPU discovery watchdog timed out`。根因是 Ollama 自带的 CUDA
+运行时比驱动新：例如驱动 546.30 只到 CUDA 12.3，而新版 llama.cpp 的 PDL
+内核探测（`ggml_cuda_kernel_can_use_pdl`）在它上面过不去——**注意这不是
+「错选了 cuda_v13」，Ollama 用 cuda_v12 同样失败**，改库版本解决不了。
+
+**强制 CPU 即可**（bge-m3 走 CPU 完全够用，53 个文本块约 3 秒、维度 1024 正确）：
+
+```powershell
+[Environment]::SetEnvironmentVariable('OLLAMA_LLM_LIBRARY','cpu','User')
+# 再重启 Ollama（托盘图标退出后重新打开）
+```
+
+两个容易踩的点：
+- **必须重启 Ollama** 让新进程继承环境变量；在已有 shell 里
+  `Start-Process` 起的进程拿到的是旧环境块，不生效。
+- 若想保留 GPU，可用 Vulkan（`OLLAMA_LLM_LIBRARY=vulkan`，实测可用但更慢），
+  或把驱动升到支持 CUDA 13 的版本后再撤掉这个变量。
+
 ### 装了模型之后，别重新入库
 
 ```powershell
