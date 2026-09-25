@@ -1,0 +1,55 @@
+# vedioAI 默认配置
+#
+# 优先级：环境变量 > .env > 本文件 > 内置默认值
+# 密钥一律走 .env，不要写在这里。
+
+# 入库产物（转写、幻灯片图、播放代理、数据库）的存放位置
+data_dir: data
+
+language: zh
+
+asr:
+  # 见 .env.example 的说明：
+  #   volc.bigasr.auc_turbo   极速版，支持本地文件 base64，无需轮询（默认，开箱即用）
+  #   volc.seedasr.auc        2.0 标准版，0.8 元/小时，只支持公网 URL，需先传对象存储
+  #   volc.bigasr.auc_idle    闲时版，更便宜，只支持公网 URL
+  resource_id: volc.bigasr.auc_turbo
+
+  # 单次提交的音频上限。超过则按静音切段后分批提交，再按偏移合并时间戳。
+  # 2 小时课按 32kbps mp3 约 29MB，可一次提交。
+  max_upload_bytes: 50331648      # 48MB
+
+  # 仅在超长音视频上生效
+  chunk_ms: 1200000               # 20 分钟
+  overlap_ms: 1000                # 分段重叠，避免正文在边界被割裂
+
+media:
+  ffmpeg: ffmpeg
+  ffprobe: ffprobe
+  audio_sample_rate: 16000
+  # 低码率是为了压住 base64 上传体积（base64 会放大约 33%）
+  audio_bitrate: 48k
+
+  # 播放代理：统一成 H.264/AAC，规避 Chromium 不支持 AC3/EAC3、MKV/FLV 不可靠
+  proxy_video_codec: libx264
+  proxy_audio_codec: aac
+  proxy_crf: 23
+  proxy_preset: veryfast
+
+slides:
+  enabled: true
+  # 每 2 秒抽一帧做变化检测
+  sample_interval_ms: 2000
+  # 与「当前代表帧」的像素差超过该比例即视为换页
+  change_ratio: 0.02
+  # 画面长期不变时强制切页，避免丢掉驻留的幻灯片
+  max_hold_ms: 120000
+  max_slides: 400
+  ocr_enabled: true
+
+retrieve:
+  top_k: 8
+  rerank_top_n: 5
+  # 按播放位置加权检索默认关闭：开启会让同一问题在不同时刻得到不同答案，
+  # 不可复现，也无法评估。要做请变成 UI 上的显式开关。
+  time_bias: false

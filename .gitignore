@@ -1,0 +1,41 @@
+# 环境与密钥
+.env
+.env.local
+*.key
+
+# 数据目录（入库产物：转写、幻灯片图、播放代理、向量）
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+
+# 模型文件（按需下载，不入库）
+models/
+*.onnx
+
+# 评估输出
+evals/runs/
+
+# pytest 临时目录（会生成测试用视频/音频）
+.pytest-tmp/
+
+# 编辑器
+.vscode/
+.idea/
+
+# 临时脚本与修复期备份
+tmp/
+
+# 上次编码事故的还原/备份产物
+*.restored
+*.replayed
+*.corrupted.bak

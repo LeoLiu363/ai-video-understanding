@@ -1,0 +1,80 @@
+# ============================================================================
+# 评估集 · 待填写（40 题）
+#
+# 这是清单，不是可选步骤。按要求填满后再开始调优，否则每次改动都无法判断
+# 是变好还是变差。
+#
+# 填写建议：
+#   1. 跑 `vedioai eval --scaffold <video_id>` 生成带真实章节与本课时间点的骨架；
+#   2. 一边看视频一边出题——题目必须来自课程真实内容，不要凭空编；
+#   3. 每题写 2-4 个 expect_keypoints，用「必须出现的具体名词/数字」，不要写
+#      「讲得清楚」这种无法自动判定的描述；
+#   4. 能在视频里定位到的题，一定要填 expect_time（这是检验「点击跳转」的唯一手段）。
+#
+# 评分标准见 evals/SCORING.md
+# ============================================================================
+
+version: 1
+
+course:
+  video_id: ""              # 填 video_id（`vedioai list` 可查）
+  title: ""
+  notes: ""                 # 例如：纯口播 / PPT 为主
+
+# 10 条最该被写进学习文档的结论
+notes_expected: []
+
+questions:
+  # ============================================================ 事实型 ×10
+  # 考「某个具体位置讲了什么 / 某个定义是什么」。
+  # 这类型答错，九成是转写错字或时间戳偏移，先查转写，别动提示词。
+  - { id: f01, type: factual, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 90000 }
+  - { id: f02, type: factual, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 90000 }
+  - { id: f03, type: factual, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 90000 }
+  - { id: f04, type: factual, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 90000 }
+  - { id: f05, type: factual, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 90000 }
+  - { id: f06, type: factual, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 90000 }
+  - { id: f07, type: factual, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 90000 }
+  - { id: f08, type: factual, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 90000 }
+  - { id: f09, type: factual, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 90000 }
+  - { id: f10, type: factual, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 90000 }
+
+  # ======================================================== 跨段聚合型 ×10
+  # 需要合并多处证据。这类型答漏，是分段边界或召回的问题。
+  - { id: c01, type: cross, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 300000 }
+  - { id: c02, type: cross, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 300000 }
+  - { id: c03, type: cross, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 300000 }
+  - { id: c04, type: cross, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 300000 }
+  - { id: c05, type: cross, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 300000 }
+  - { id: c06, type: cross, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 300000 }
+  - { id: c07, type: cross, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 300000 }
+  - { id: c08, type: cross, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 300000 }
+  - { id: c09, type: cross, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 300000 }
+  - { id: c10, type: cross, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 300000 }
+
+  # ============================================================ 视觉型 ×10
+  # 必须看画面才能答对。这类型答错，先确认 OCR 是否真的抽到字。
+  # 强烈建议用 PPT 为主的那门课出这类题。
+  - { id: v01, type: visual, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 120000 }
+  - { id: v02, type: visual, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 120000 }
+  - { id: v03, type: visual, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 120000 }
+  - { id: v04, type: visual, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 120000 }
+  - { id: v05, type: visual, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 120000 }
+  - { id: v06, type: visual, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 120000 }
+  - { id: v07, type: visual, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 120000 }
+  - { id: v08, type: visual, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 120000 }
+  - { id: v09, type: visual, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 120000 }
+  - { id: v10, type: visual, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 120000 }
+
+  # ============================================================ 全局型 ×10
+  # 统计、归纳、跨章节比较。这类型答错，查摘要树是否漏章。
+  - { id: g01, type: global, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 600000 }
+  - { id: g02, type: global, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 600000 }
+  - { id: g03, type: global, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 600000 }
+  - { id: g04, type: global, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 600000 }
+  - { id: g05, type: global, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 600000 }
+  - { id: g06, type: global, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 600000 }
+  - { id: g07, type: global, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 600000 }
+  - { id: g08, type: global, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 600000 }
+  - { id: g09, type: global, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 600000 }
+  - { id: g10, type: global, question: "", expect_keypoints: [], expect_time: "", tolerance_ms: 600000 }

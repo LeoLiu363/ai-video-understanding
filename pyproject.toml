@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vedioai"
+version = "0.1.0"
+description = "课程视频 AI 理解：本地转写与索引 + 云端大模型问答与写文档"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "httpx>=0.27",
+    "pydantic>=2.9",
+    "PyYAML>=6.0",
+    "jieba>=0.42.1",
+    "numpy>=1.26",
+    "Pillow>=10.4",
+]
+
+[project.optional-dependencies]
+ocr = ["rapidocr-onnxruntime>=1.4.4"]
+local = ["onnxruntime>=1.20", "tokenizers>=0.20"]
+dev = ["pytest>=8.3", "ruff>=0.7"]
+
+[project.scripts]
+vedioai = "vedioai.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# 测试会生成视频、音频、幻灯片与 SQLite 文件。pytest 默认把临时目录放在
+# 系统盘（C:\Users\...\AppData\Local\Temp），空间紧张时会直接报
+# 「database or disk is full」。统一改到项目内，避免污染系统盘。
+addopts = "--basetemp=.pytest-tmp"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

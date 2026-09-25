@@ -1,0 +1,19 @@
+# 统一换行：仓库内一律 LF，检出时也保持 LF（避免 Windows 上 CRLF 反复改写）
+* text=auto eol=lf
+
+# 二进制文件不做换行转换
+*.mp4 binary
+*.mp3 binary
+*.onnx binary
+*.db binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+
+# 锁文件与导出物在合并时按「生成物」处理
+uv.lock text eol=lf

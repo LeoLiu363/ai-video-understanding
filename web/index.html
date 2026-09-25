@@ -1,0 +1,536 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>vedioAI · 课程视频 AI 理解</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --panel-2: #1e222b; --line: #2a2f3a;
+    --text: #e6e9ef; --muted: #98a2b3; --accent: #4f8cff; --accent-2: #34d399;
+    --warn: #fbbf24; --err: #f87171;
+    --radius: 10px;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 14px/1.65 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    display: grid; grid-template-rows: auto 1fr; height: 100vh; overflow: hidden;
+  }
+  header {
+    display: flex; align-items: center; gap: 12px; padding: 10px 16px;
+    border-bottom: 1px solid var(--line); background: var(--panel);
+  }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .3px; }
+  header .spacer { flex: 1; }
+  .badge {
+    font-size: 12px; padding: 2px 8px; border-radius: 999px;
+    border: 1px solid var(--line); color: var(--muted);
+  }
+  .badge.ok { color: var(--accent-2); border-color: #1f4d3a; }
+  .badge.bad { color: var(--warn); border-color: #4d411f; }
+
+  main {
+    display: grid; grid-template-columns: 280px minmax(420px, 1fr) minmax(380px, 460px);
+    min-height: 0;
+  }
+  .col { min-height: 0; overflow-y: auto; border-right: 1px solid var(--line); }
+  .col:last-child { border-right: none; }
+  .col-head {
+    position: sticky; top: 0; z-index: 2; background: var(--panel);
+    padding: 10px 14px; border-bottom: 1px solid var(--line);
+    font-size: 12px; text-transform: uppercase; letter-spacing: .8px; color: var(--muted);
+  }
+  .pad { padding: 12px 14px; }
+
+  input, textarea, button, select {
+    font: inherit; color: var(--text); background: var(--panel-2);
+    border: 1px solid var(--line); border-radius: var(--radius); padding: 8px 10px;
+  }
+  input:focus, textarea:focus { outline: 1px solid var(--accent); }
+  button { cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #06101f; font-weight: 600; }
+  button.primary:disabled { opacity: .5; cursor: default; }
+  button.ghost { background: transparent; }
+  .row { display: flex; gap: 8px; }
+  .row > input { flex: 1; min-width: 0; }
+
+  .lib-item {
+    padding: 9px 12px; border-bottom: 1px solid var(--line); cursor: pointer;
+  }
+  .lib-item:hover { background: var(--panel-2); }
+  .lib-item.active { background: #1b2434; border-left: 3px solid var(--accent); }
+  .lib-item .t { font-weight: 600; font-size: 13px; }
+  .lib-item .m { color: var(--muted); font-size: 12px; margin-top: 2px; }
+
+  .player-wrap { background: #000; }
+  video { width: 100%; max-height: 46vh; display: block; background: #000; }
+  .player-meta {
+    display: flex; align-items: center; gap: 10px; padding: 8px 14px;
+    border-bottom: 1px solid var(--line); font-size: 12px; color: var(--muted);
+  }
+  .player-meta strong { color: var(--text); font-size: 13px; font-weight: 600; }
+
+  .chapter {
+    display: flex; gap: 10px; padding: 8px 14px; border-bottom: 1px solid var(--line);
+    cursor: pointer;
+  }
+  .chapter:hover { background: var(--panel-2); }
+  .chapter .ts { color: var(--accent); font-variant-numeric: tabular-nums; font-size: 12px; flex: 0 0 auto; }
+  .chapter .tt { font-size: 13px; }
+  .chapter .sm { color: var(--muted); font-size: 12px; margin-top: 3px; white-space: pre-wrap; }
+
+  .msg { padding: 10px 12px; border-radius: var(--radius); margin-bottom: 12px; }
+  .msg.user { background: #1b2434; margin-left: 24px; }
+  .msg.ai { background: var(--panel-2); }
+  .msg .who { font-size: 11px; color: var(--muted); margin-bottom: 4px; letter-spacing: .5px; }
+  .msg .body { white-space: pre-wrap; word-break: break-word; }
+  .msg .body pre {
+    background: #0b0e13; padding: 10px; border-radius: 8px; overflow-x: auto;
+    border: 1px solid var(--line);
+  }
+  .msg .body code { background: #0b0e13; padding: 1px 4px; border-radius: 4px; font-size: 12.5px; }
+  .meta-line { color: var(--muted); font-size: 11.5px; margin-top: 8px; }
+
+  .ts-link {
+    color: var(--accent); cursor: pointer; text-decoration: underline dotted;
+    font-variant-numeric: tabular-nums;
+  }
+  .ts-link:hover { color: #7eaaff; }
+  .cites { margin-top: 10px; border-top: 1px dashed var(--line); padding-top: 8px; }
+  .cite { font-size: 12px; color: var(--muted); margin: 4px 0; }
+  .cite .txt { color: #c3cad8; }
+
+  .thumbs { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+  .thumbs img { height: 84px; border-radius: 6px; border: 1px solid var(--line); cursor: pointer; }
+
+  .progress { height: 6px; background: var(--panel-2); border-radius: 3px; overflow: hidden; }
+  .progress > i { display: block; height: 100%; background: var(--accent); width: 0; transition: width .3s; }
+  .status-line { font-size: 12px; color: var(--muted); margin-top: 6px; }
+  .err { color: var(--err); font-size: 12.5px; }
+  .notes-out {
+    white-space: pre-wrap; background: #0b0e13; border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 12px; font-size: 13px; max-height: 40vh; overflow: auto;
+  }
+  .tabs { display: flex; gap: 4px; }
+  .tabs button { padding: 5px 12px; font-size: 12.5px; border-radius: 999px; }
+  .tabs button.on { background: var(--accent); color: #06101f; border-color: var(--accent); font-weight: 600; }
+  .hint { color: var(--muted); font-size: 12px; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<header>
+  <h1>vedioAI</h1>
+  <span class="hint">课程视频 AI 理解 · 本地转写索引 + 云端问答</span>
+  <span class="spacer"></span>
+  <span id="badge-asr" class="badge">ASR ?</span>
+  <span id="badge-llm" class="badge">LLM ?</span>
+  <span id="badge-vision" class="badge">视觉 ?</span>
+  <span id="badge-local" class="badge">本地模型 ?</span>
+</header>
+
+<main>
+  <!-- ---------------------------------------------------------- 课程库 -->
+  <section class="col">
+    <div class="col-head">课程库</div>
+    <div class="pad">
+      <div class="row">
+        <input id="ingest-path" placeholder="粘贴本地视频完整路径，如 D:\courses\a.mp4" />
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button class="primary" id="btn-ingest" style="flex:1">入库</button>
+        <button class="ghost" id="btn-refresh" title="刷新">刷新</button>
+      </div>
+      <div id="ingest-progress" class="hidden" style="margin-top:10px">
+        <div class="progress"><i id="ingest-bar"></i></div>
+        <div class="status-line" id="ingest-status"></div>
+      </div>
+      <div id="ingest-error" class="err" style="margin-top:6px"></div>
+    </div>
+    <div id="library"></div>
+  </section>
+
+  <!-- ---------------------------------------------------------- 播放器 -->
+  <section class="col">
+    <div class="player-wrap">
+      <video id="player" controls preload="metadata"></video>
+    </div>
+    <div class="player-meta">
+      <strong id="video-title">未选择课程</strong>
+      <span id="video-duration"></span>
+      <span class="spacer" style="flex:1"></span>
+      <span id="player-clock"></span>
+    </div>
+    <div class="col-head">章节</div>
+    <div id="chapters" class="pad hint">入库完成后显示章节。</div>
+  </section>
+
+  <!-- ---------------------------------------------------------- AI 面板 -->
+  <section class="col">
+    <div class="col-head">
+      <span>AI 助手</span>
+    </div>
+    <div class="pad">
+      <div class="tabs" style="margin-bottom:10px">
+        <button id="tab-ask" class="on">问答</button>
+        <button id="tab-notes">学习文档</button>
+      </div>
+
+      <!-- 问答 -->
+      <div id="panel-ask">
+        <div id="chat"></div>
+        <textarea id="question" rows="3" placeholder="就这门课提问，例如：老师讲的三种排序分别是什么？"></textarea>
+        <div class="row" style="margin-top:8px">
+          <button class="primary" id="btn-ask" style="flex:1">提问</button>
+          <label class="hint" style="display:flex;align-items:center;gap:4px">
+            <input type="checkbox" id="use-position" /> 附带当前进度
+          </label>
+        </div>
+      </div>
+
+      <!-- 学习文档 -->
+      <div id="panel-notes" class="hidden">
+        <p class="hint">按章节分层生成学习笔记（Markdown），每节带时间锚点。</p>
+        <button class="primary" id="btn-notes">生成学习文档</button>
+        <div id="notes-progress" class="hidden" style="margin-top:10px">
+          <div class="progress"><i id="notes-bar"></i></div>
+          <div class="status-line" id="notes-status"></div>
+        </div>
+        <div id="notes-out" class="notes-out hidden" style="margin-top:10px"></div>
+        <div class="row" style="margin-top:8px">
+          <button class="ghost hidden" id="btn-download">下载 Markdown</button>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let current = null;       // 当前课程的详情
+let currentId = null;
+let pollTimer = null;
+let notesMarkdown = "";
+
+/* ---------------------------------------------------------------- 工具 */
+
+function fmt(ms) {
+  const total = Math.max(0, Math.floor((ms || 0) / 1000));
+  const h = Math.floor(total / 3600), m = Math.floor((total % 3600) / 60), s = total % 60;
+  const pad = (n) => String(n).padStart(2, "0");
+  return h ? `${h}:${pad(m)}:${pad(s)}` : `${pad(m)}:${pad(s)}`;
+}
+
+function seek(ms) {
+  const v = $("player");
+  if (!v.src) return;
+  v.currentTime = Math.max(0, ms / 1000);
+  v.play().catch(() => {});
+  v.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+/** 极简 Markdown 渲染：标题、列表、粗体、代码块、行内代码。 */
+function md(text) {
+  let out = esc(text);
+  out = out.replace(/```([\s\S]*?)```/g, (_, code) => `<pre>${code.trim()}</pre>`);
+  out = out.replace(/`([^`\n]+)`/g, "<code>$1</code>");
+  out = out.replace(/^###\s+(.*)$/gm, "<strong>$1</strong>");
+  out = out.replace(/^##\s+(.*)$/gm, "<strong>$1</strong>");
+  out = out.replace(/^#\s+(.*)$/gm, "<strong>$1</strong>");
+  out = out.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  return out;
+}
+
+/** 把正文里的 [MM:SS] / [时间 MM:SS] 变成可点击的时间戳。 */
+function linkifyTimestamps(html) {
+  return html.replace(/\[(?:时间\s*)?(\d{1,2}:\d{2}(?::\d{2})?)\]/g, (m, ts) => {
+    const parts = ts.split(":").map(Number);
+    while (parts.length < 3) parts.unshift(0);
+    const ms = ((parts[0] * 60 + parts[1]) * 60 + parts[2]) * 1000;
+    return `<span class="ts-link" data-ms="${ms}">[${ts}]</span>`;
+  });
+}
+
+async function api(path, opts) {
+  const res = await fetch(path, {
+    headers: { "Content-Type": "application/json" },
+    ...opts,
+  });
+  if (!res.ok) {
+    let detail = res.statusText;
+    try { detail = (await res.json()).detail || detail; } catch (e) {}
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
+/* ---------------------------------------------------------------- 健康 */
+
+async function loadHealth() {
+  try {
+    const h = await api("/api/health");
+    const set = (id, ok, label) => {
+      const el = $(id);
+      el.textContent = `${label} ${ok ? "OK" : "未配置"}`;
+      el.className = "badge " + (ok ? "ok" : "bad");
+    };
+    set("badge-asr", h.asr_ready, "ASR");
+    set("badge-llm", h.llm_ready, "LLM");
+    set("badge-vision", h.vision_ready, "视觉");
+    set("badge-local", h.embedder || h.reranker, "本地模型");
+  } catch (e) { /* 服务还没起好 */ }
+}
+
+/* ---------------------------------------------------------------- 课程库 */
+
+async function loadLibrary() {
+  const data = await api("/api/library");
+  const box = $("library");
+  if (!data.items.length) {
+    box.innerHTML = `<div class="pad hint">课程库为空。粘贴视频路径后点「入库」。</div>`;
+    return;
+  }
+  box.innerHTML = data.items.map((v) => `
+    <div class="lib-item ${v.video_id === currentId ? "active" : ""}" data-id="${v.video_id}">
+      <div class="t">${esc(v.title || "未命名")}</div>
+      <div class="m">${esc(v.duration_label)} · ${v.chapter_count} 章 · ${v.chunk_count} 块 · ${
+        v.status === "ready" ? "就绪" : v.status === "failed" ? "失败" : v.status}</div>
+    </div>`).join("");
+  box.querySelectorAll(".lib-item").forEach((el) => {
+    el.onclick = () => openVideo(el.dataset.id);
+  });
+}
+
+async function openVideo(id) {
+  currentId = id;
+  current = await api(`/api/library/${id}`);
+  const v = current.video;
+  $("video-title").textContent = v.title || "未命名";
+  $("video-duration").textContent = v.duration_label;
+  $("player").src = `/media/${id}`;
+
+  const list = $("chapters");
+  if (!current.chapters.length) {
+    list.innerHTML = `<span class="hint">该课程没有章节信息。</span>`;
+  } else {
+    list.innerHTML = current.chapters.map((c) => `
+      <div class="chapter" data-ms="${c.start_ms}">
+        <span class="ts">${esc(c.label)}</span>
+        <span style="flex:1">
+          <div class="tt">${esc(c.title)}</div>
+          ${c.summary ? `<div class="sm">${esc(c.summary.slice(0, 220))}</div>` : ""}
+        </span>
+      </div>`).join("");
+    list.querySelectorAll(".chapter").forEach((el) => {
+      el.onclick = () => seek(Number(el.dataset.ms));
+    });
+  }
+  $("chat").innerHTML = "";
+  $("notes-out").classList.add("hidden");
+  $("btn-download").classList.add("hidden");
+  loadLibrary();
+}
+
+/* ---------------------------------------------------------------- 入库 */
+
+async function startIngest() {
+  const path = $("ingest-path").value.trim();
+  if (!path) return;
+  $("ingest-error").textContent = "";
+  $("btn-ingest").disabled = true;
+  try {
+    const job = await api("/api/ingest", {
+      method: "POST",
+      body: JSON.stringify({ path }),
+    });
+    $("ingest-progress").classList.remove("hidden");
+    pollJob(job.job_id, "ingest");
+  } catch (e) {
+    $("ingest-error").textContent = e.message;
+    $("btn-ingest").disabled = false;
+  }
+}
+
+function pollJob(jobId, kind) {
+  if (pollTimer) clearInterval(pollTimer);
+  const bar = kind === "ingest" ? $("ingest-bar") : $("notes-bar");
+  const status = kind === "ingest" ? $("ingest-status") : $("notes-status");
+  const box = kind === "ingest" ? $("ingest-progress") : $("notes-progress");
+  box.classList.remove("hidden");
+
+  pollTimer = setInterval(async () => {
+    let job;
+    try { job = await api(`/api/jobs/${jobId}`); }
+    catch (e) { clearInterval(pollTimer); return; }
+
+    bar.style.width = `${job.percent}%`;
+    status.textContent = `${job.stage || ""} · ${job.message || ""}`;
+
+    if (job.status === "done") {
+      clearInterval(pollTimer);
+      status.textContent = "完成";
+      if (kind === "ingest") {
+        $("btn-ingest").disabled = false;
+        await loadLibrary();
+        const vid = job.result.video_id;
+        if (vid) await openVideo(vid);
+      } else {
+        notesMarkdown = job.result.markdown || "";
+        $("notes-out").textContent = notesMarkdown;
+        $("notes-out").classList.remove("hidden");
+        $("btn-download").classList.remove("hidden");
+      }
+    } else if (job.status === "failed") {
+      clearInterval(pollTimer);
+      status.textContent = "失败";
+      if (kind === "ingest") {
+        $("ingest-error").textContent = job.error || "入库失败";
+        $("btn-ingest").disabled = false;
+      } else {
+        $("notes-status").textContent = `失败：${job.error}`;
+      }
+    }
+  }, 1000);
+}
+
+/* ---------------------------------------------------------------- 问答 */
+
+function pushMsg(cls, who, bodyHtml, meta) {
+  const div = document.createElement("div");
+  div.className = `msg ${cls}`;
+  div.innerHTML = `<div class="who">${who}</div><div class="body">${bodyHtml}</div>${
+    meta ? `<div class="meta-line">${meta}</div>` : ""}`;
+  $("chat").appendChild(div);
+  div.scrollIntoView({ behavior: "smooth", block: "end" });
+  return div;
+}
+
+async function ask() {
+  const q = $("question").value.trim();
+  if (!q) return;
+  if (!currentId) { alert("请先选择一门课程"); return; }
+  $("question").value = "";
+  pushMsg("user", "我", esc(q));
+
+  const btn = $("btn-ask");
+  btn.disabled = true;
+  const pending = pushMsg("ai", "助手", '<span class="hint">思考中…</span>');
+
+  try {
+    const body = { video_id: currentId, question: q };
+    if ($("use-position").checked && $("player").src) {
+      body.current_ms = Math.floor($("player").currentTime * 1000);
+    }
+    const ans = await api("/api/ask", { method: "POST", body: JSON.stringify(body) });
+
+    const cites = (ans.citations || []).map((c) => `
+      <div class="cite">
+        <span class="ts-link" data-ms="${c.start_ms}">[${esc(c.label)}]</span>
+        <span class="txt">${esc(c.text.slice(0, 90))}…</span>
+      </div>`).join("");
+
+    const thumbs = (ans.images || []).map((src, i) =>
+      `<img src="/api/slides/${currentId}/${c.slide_idx ?? ""}" data-src="${esc(src)}" alt="课件 ${i + 1}">`
+    ).join("");
+
+    const u = ans.usage || {};
+    const meta = `意图 ${ans.intent} · 前缀约 ${ans.prefix_tokens} tokens` +
+      (u.prompt_tokens ? ` · 输入 ${u.prompt_tokens}（缓存命中 ${u.cached_tokens ?? 0}，${
+        Math.round((u.cache_hit_rate || 0) * 100)}%）` : "");
+
+    pending.querySelector(".body").innerHTML =
+      linkifyTimestamps(md(ans.text)) +
+      (cites ? `<div class="cites">${cites}</div>` : "");
+    pending.querySelector(".meta-line")?.remove();
+    pending.insertAdjacentHTML("beforeend", `<div class="meta-line">${meta}</div>`);
+    if (thumbs) pending.insertAdjacentHTML("beforeend", `<div class="thumbs">${thumbs}</div>`);
+    if (u.cache_hit_rate === 0) {
+      pending.insertAdjacentHTML("beforeend",
+        `<div class="meta-line">提示：本次未命中上下文缓存。整稿前缀必须保持稳定，否则成本会上升一个数量级。</div>`);
+    }
+  } catch (e) {
+    pending.querySelector(".body").innerHTML = `<span class="err">${esc(e.message)}</span>`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+/* ---------------------------------------------------------------- 文档 */
+
+async function generateNotes() {
+  if (!currentId) { alert("请先选择一门课程"); return; }
+  const btn = $("btn-notes");
+  btn.disabled = true;
+  $("notes-out").classList.add("hidden");
+  try {
+    const job = await api("/api/notes", {
+      method: "POST",
+      body: JSON.stringify({ video_id: currentId }),
+    });
+    pollJob(job.job_id, "notes");
+  } catch (e) {
+    $("notes-status").textContent = e.message;
+    $("notes-progress").classList.remove("hidden");
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+/* ---------------------------------------------------------------- 绑定 */
+
+$("btn-ingest").onclick = startIngest;
+$("btn-refresh").onclick = loadLibrary;
+$("btn-ask").onclick = ask;
+$("btn-notes").onclick = generateNotes;
+$("ingest-path").addEventListener("keydown", (e) => { if (e.key === "Enter") startIngest(); });
+$("question").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) ask();
+});
+
+$("tab-ask").onclick = () => {
+  $("tab-ask").classList.add("on"); $("tab-notes").classList.remove("on");
+  $("panel-ask").classList.remove("hidden"); $("panel-notes").classList.add("hidden");
+};
+$("tab-notes").onclick = () => {
+  $("tab-notes").classList.add("on"); $("tab-ask").classList.remove("on");
+  $("panel-notes").classList.remove("hidden"); $("panel-ask").classList.add("hidden");
+};
+
+$("btn-download").onclick = () => {
+  const blob = new Blob([notesMarkdown], { type: "text/markdown;charset=utf-8" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `${(current?.video?.title || "notes")}.md`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+};
+
+// 点击任意时间戳跳转
+document.addEventListener("click", (e) => {
+  const el = e.target.closest(".ts-link");
+  if (el && el.dataset.ms) seek(Number(el.dataset.ms));
+  const th = e.target.closest(".thumbs img");
+  if (th && th.dataset.src) window.open(th.dataset.src, "_blank");
+});
+
+// 播放时间显示
+$("player").addEventListener("timeupdate", () => {
+  $("player-clock").textContent = fmt($("player").currentTime * 1000);
+});
+
+/* ---------------------------------------------------------------- 启动 */
+
+loadHealth();
+loadLibrary();
+setInterval(loadHealth, 30000);
+</script>
+</body>
+</html>
