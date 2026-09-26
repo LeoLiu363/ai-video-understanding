@@ -32,17 +32,33 @@
   .badge.bad { color: var(--warn); border-color: #4d411f; }
 
   main {
-    display: grid; grid-template-columns: 280px minmax(420px, 1fr) minmax(380px, 460px);
+    --w-lib: 260px;
+    --w-ai: 560px;
+    display: grid;
+    /* 课程库 | 拖条 | 播放器 | 拖条 | AI —— AI 默认更宽，拖条可再拉 */
+    grid-template-columns: var(--w-lib) 5px minmax(280px, 1fr) 5px var(--w-ai);
     min-height: 0;
   }
-  .col { min-height: 0; overflow-y: auto; border-right: 1px solid var(--line); }
-  .col:last-child { border-right: none; }
+  .col { min-height: 0; overflow-y: auto; border-right: none; }
   .col-head {
     position: sticky; top: 0; z-index: 2; background: var(--panel);
     padding: 10px 14px; border-bottom: 1px solid var(--line);
     font-size: 12px; text-transform: uppercase; letter-spacing: .8px; color: var(--muted);
   }
   .pad { padding: 12px 14px; }
+
+  /* 列宽拖动手柄 */
+  .splitter {
+    position: relative; z-index: 3;
+    background: var(--line); cursor: col-resize;
+    transition: background .15s;
+  }
+  .splitter::after {
+    content: ""; position: absolute; inset: 0 -3px; /* 扩大可点区域 */
+  }
+  .splitter:hover, .splitter.dragging { background: var(--accent); }
+  body.col-resizing { cursor: col-resize; user-select: none; }
+  body.col-resizing * { cursor: col-resize !important; }
 
   input, textarea, button, select {
     font: inherit; color: var(--text); background: var(--panel-2);
@@ -86,13 +102,24 @@
   .msg.user { background: #1b2434; margin-left: 24px; }
   .msg.ai { background: var(--panel-2); }
   .msg .who { font-size: 11px; color: var(--muted); margin-bottom: 4px; letter-spacing: .5px; }
-  .msg .body { white-space: pre-wrap; word-break: break-word; }
+  /* 正文是 HTML（标题/表格/列表），不能用 pre-wrap，否则表格单元格会被挤成一字一行 */
+  .msg .body { word-break: normal; overflow-wrap: anywhere; }
   .msg .body pre {
     background: #0b0e13; padding: 10px; border-radius: 8px; overflow-x: auto;
-    border: 1px solid var(--line);
+    border: 1px solid var(--line); white-space: pre;
   }
   .msg .body code { background: #0b0e13; padding: 1px 4px; border-radius: 4px; font-size: 12.5px; }
   .meta-line { color: var(--muted); font-size: 11.5px; margin-top: 8px; }
+
+  .session-bar {
+    display: flex; gap: 4px; align-items: center; margin-bottom: 10px;
+  }
+  .session-bar select {
+    flex: 1; min-width: 0; background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; font-size: 12.5px;
+  }
+  .session-bar button { padding: 5px 9px; font-size: 13px; line-height: 1; }
+  #chat { max-height: 52vh; overflow: auto; margin-bottom: 8px; }
 
   .ts-link {
     color: var(--accent); cursor: pointer; text-decoration: underline dotted;
@@ -135,6 +162,15 @@
     margin: 8px 0; padding: 4px 0 4px 12px; border-left: 3px solid var(--line);
     color: var(--muted);
   }
+  /* 助教「拓展」段落：和课内结论视觉上分开，避免被当成视频原话 */
+  .md blockquote.ext {
+    border-left-color: var(--warn);
+    color: var(--text);
+    background: #1a1810;
+    padding: 8px 12px;
+    border-radius: 0 8px 8px 0;
+  }
+  .md blockquote.ext strong:first-child { color: var(--warn); }
   .md code { background: #0b0e13; padding: 1px 5px; border-radius: 4px; font-size: 12.5px; }
   .md pre {
     background: #0b0e13; padding: 10px 12px; border-radius: 8px; overflow-x: auto;
@@ -142,12 +178,23 @@
   }
   .md pre code { background: none; padding: 0; }
   .md a { color: var(--accent); }
-  .md-table-wrap { overflow-x: auto; margin: 12px 0; border: 1px solid var(--line); border-radius: 8px; }
-  .md table { border-collapse: collapse; width: 100%; font-size: 13px; }
-  .md th, .md td { border-bottom: 1px solid var(--line); padding: 7px 10px; text-align: left; vertical-align: top; }
+  .md-table-wrap {
+    overflow-x: auto; margin: 12px 0; border: 1px solid var(--line); border-radius: 8px;
+    max-width: 100%;
+  }
+  /* max-content：内容决定列宽，窄栏时横向滚动，而不是把字挤成一列 */
+  .md table {
+    border-collapse: collapse; width: max-content; min-width: 100%; font-size: 13px;
+  }
+  .md th, .md td {
+    border-bottom: 1px solid var(--line); padding: 7px 10px;
+    text-align: left; vertical-align: top;
+    white-space: normal; word-break: normal; overflow-wrap: anywhere;
+  }
   .md th { background: var(--panel-2); font-weight: 600; white-space: nowrap; }
   .md tr:last-child td { border-bottom: none; }
-  .md td { min-width: 60px; }
+  .md td { min-width: 7em; }
+  .md td:first-child { min-width: 9em; max-width: 16em; }
   .md strong { color: #fff; }
 
   /* 时间标注：`> 时间 00:55` 与表格里的整格时间 */
@@ -232,7 +279,7 @@
 
 <main>
   <!-- ---------------------------------------------------------- 课程库 -->
-  <section class="col">
+  <section class="col" id="col-lib">
     <div class="col-head">课程库</div>
     <div class="pad">
       <div class="row">
@@ -251,8 +298,10 @@
     <div id="library"></div>
   </section>
 
+  <div class="splitter" id="split-lib" title="拖动调整课程库宽度"></div>
+
   <!-- ---------------------------------------------------------- 播放器 -->
-  <section class="col">
+  <section class="col" id="col-player">
     <div class="player-wrap">
       <video id="player" controls preload="metadata"></video>
     </div>
@@ -266,8 +315,10 @@
     <div id="chapters" class="pad hint">入库完成后显示章节。</div>
   </section>
 
+  <div class="splitter" id="split-ai" title="拖动调整 AI 面板宽度"></div>
+
   <!-- ---------------------------------------------------------- AI 面板 -->
-  <section class="col">
+  <section class="col" id="col-ai">
     <div class="col-head">
       <span>AI 助手</span>
     </div>
@@ -280,6 +331,12 @@
 
       <!-- 问答 -->
       <div id="panel-ask">
+        <div class="session-bar">
+          <select id="session-select" title="切换会话"></select>
+          <button class="ghost" id="btn-session-new" title="新建会话">＋</button>
+          <button class="ghost" id="btn-session-rename" title="重命名">✎</button>
+          <button class="ghost" id="btn-session-archive" title="归档当前会话">🗄</button>
+        </div>
         <div id="chat"></div>
         <textarea id="question" rows="3" placeholder="就这门课提问，例如：老师讲的三种排序分别是什么？"></textarea>
         <div class="row" style="margin-top:8px">
@@ -350,6 +407,7 @@
 const $ = (id) => document.getElementById(id);
 let current = null;       // 当前课程的详情
 let currentId = null;
+let currentSessionId = null;
 let pollTimer = null;
 
 /* ---------------------------------------------------------------- 工具 */
@@ -486,7 +544,10 @@ function renderMarkdown(src) {
             .join("")
         );
       } else {
-        out.push(`<blockquote>${mdInline(text)}</blockquote>`);
+        const isExt = /^\*\*拓展\*\*/.test(text) || /^拓展\b/.test(text);
+        out.push(
+          `<blockquote class="${isExt ? "ext" : ""}">${mdInline(text)}</blockquote>`
+        );
       }
       continue;
     }
@@ -538,9 +599,9 @@ function linkifyTimestamps(html) {
   });
 }
 
-/** 一次到位：渲染 + 时间戳可点。 */
+/** 一次到位：渲染 + 时间戳可点。聊天与阅读都包一层 .md，表格/标题样式才能生效。 */
 function md(text) {
-  return linkifyTimestamps(renderMarkdown(text));
+  return `<div class="md">${linkifyTimestamps(renderMarkdown(text))}</div>`;
 }
 
 async function api(path, opts) {
@@ -618,6 +679,8 @@ async function openVideo(id) {
     });
   }
   $("chat").innerHTML = "";
+  currentSessionId = null;
+  await loadSessions(id);
   await loadNotes(id);
   loadLibrary();
 }
@@ -691,6 +754,136 @@ function pollJob(jobId, kind) {
   }, 1000);
 }
 
+/* ---------------------------------------------------------------- 会话 */
+
+async function loadSessions(videoId, preferId) {
+  if (!videoId) return;
+  let items = [];
+  try {
+    const data = await api(`/api/sessions?video_id=${encodeURIComponent(videoId)}`);
+    items = data.items || [];
+  } catch (e) {
+    // 旧服务尚未重启时没有会话接口——降级成无会话的单轮问答，不堵死整页
+    $("session-select").innerHTML = `<option value="">（服务需重启后启用会话）</option>`;
+    currentSessionId = null;
+    $("chat").innerHTML = `<div class="hint">会话功能要等服务重启后生效；现在仍可单轮提问。</div>`;
+    return;
+  }
+  if (!items.length) {
+    const created = await api("/api/sessions", {
+      method: "POST",
+      body: JSON.stringify({ video_id: videoId }),
+    });
+    items = [created];
+  }
+  const want = preferId || currentSessionId || items[0].session_id;
+  renderSessionSelect(items, want);
+  await openSession(want);
+}
+
+function renderSessionSelect(items, selectedId) {
+  const sel = $("session-select");
+  sel.innerHTML = items.map((s) => {
+    const label = esc(s.display_title || s.title || "新对话");
+    const n = s.message_count || 0;
+    return `<option value="${esc(s.session_id)}" ${
+      s.session_id === selectedId ? "selected" : ""
+    }>${label}${n ? ` · ${n} 条` : ""}</option>`;
+  }).join("");
+}
+
+async function openSession(sessionId) {
+  if (!sessionId) return;
+  currentSessionId = sessionId;
+  $("chat").innerHTML = "";
+  let data;
+  try {
+    data = await api(`/api/sessions/${encodeURIComponent(sessionId)}`);
+  } catch (e) {
+    pushMsg("ai", "助手", `<span class="err">加载会话失败：${esc(e.message)}</span>`);
+    return;
+  }
+  const msgs = data.messages || [];
+  if (!msgs.length) {
+    $("chat").innerHTML = `<div class="hint">这是新对话。提问会保留在这里，刷新后也能回来。</div>`;
+    return;
+  }
+  for (const m of msgs) {
+    if (m.role === "user") {
+      pushMsg("user", "我", esc(m.content));
+    } else {
+      renderAssistantMessage(m.content, m.meta || {});
+    }
+  }
+}
+
+function renderAssistantMessage(text, meta) {
+  const cites = (meta.citations || []).map((c) => `
+    <div class="cite">
+      <span class="ts-link" data-ms="${c.start_ms}">[${esc(c.label)}]</span>
+      <span class="txt">${esc((c.text || "").slice(0, 90))}…</span>
+    </div>`).join("");
+
+  const thumbs = (meta.citations || [])
+    .filter((c) => (c.slide_idxs || []).length)
+    .slice(0, 4)
+    .map((c) => {
+      const idx = c.slide_idxs[0];
+      return `<img src="/api/slides/${currentId}/${idx}" alt="课件 ${idx}"
+        data-ms="${c.start_ms}" data-idx="${idx}" title="课件第 ${idx + 1} 帧 · 点击放大">`;
+    })
+    .join("");
+
+  const u = meta.usage || {};
+  const line = [
+    meta.intent ? `意图 ${meta.intent}` : "",
+    meta.prefix_tokens != null ? `前缀约 ${meta.prefix_tokens} tokens` : "",
+    u.prompt_tokens
+      ? `输入 ${u.prompt_tokens}（缓存命中 ${u.cached_tokens ?? 0}，${
+          Math.round((u.cache_hit_rate || 0) * 100)}%）`
+      : "",
+  ].filter(Boolean).join(" · ");
+
+  const div = pushMsg("ai", "助手", md(text));
+  if (cites) div.insertAdjacentHTML("beforeend", `<div class="cites">${cites}</div>`);
+  if (line) div.insertAdjacentHTML("beforeend", `<div class="meta-line">${line}</div>`);
+  if (thumbs) div.insertAdjacentHTML("beforeend", `<div class="thumbs">${thumbs}</div>`);
+  return div;
+}
+
+async function newSession() {
+  if (!currentId) return;
+  const created = await api("/api/sessions", {
+    method: "POST",
+    body: JSON.stringify({ video_id: currentId }),
+  });
+  await loadSessions(currentId, created.session_id);
+  $("question").focus();
+}
+
+async function renameSession() {
+  if (!currentSessionId) return;
+  const cur = $("session-select").selectedOptions[0]?.textContent || "";
+  const title = prompt("会话名称", cur.replace(/\s·\s*\d+\s*条$/, ""));
+  if (title == null) return;
+  await api(`/api/sessions/${encodeURIComponent(currentSessionId)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ title }),
+  });
+  await loadSessions(currentId, currentSessionId);
+}
+
+async function archiveSession() {
+  if (!currentSessionId) return;
+  if (!confirm("归档这个会话？归档后默认列表不再显示（可再新建）。")) return;
+  await api(`/api/sessions/${encodeURIComponent(currentSessionId)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ archived: true }),
+  });
+  currentSessionId = null;
+  await loadSessions(currentId);
+}
+
 /* ---------------------------------------------------------------- 问答 */
 
 function pushMsg(cls, who, bodyHtml, meta) {
@@ -707,7 +900,25 @@ async function ask() {
   const q = $("question").value.trim();
   if (!q) return;
   if (!currentId) { alert("请先选择一门课程"); return; }
+  // 没有会话时先建一个（旧服务降级路径下 session 可能仍为空，那时走单轮）
+  if (!currentSessionId) {
+    try {
+      const created = await api("/api/sessions", {
+        method: "POST",
+        body: JSON.stringify({ video_id: currentId }),
+      });
+      currentSessionId = created.session_id;
+      await loadSessions(currentId, currentSessionId);
+      // loadSessions 会清空 chat，把刚要问的话重新塞回去
+      $("chat").innerHTML = "";
+    } catch (_) { /* 旧服务：继续单轮 */ }
+  }
+
   $("question").value = "";
+  // 清掉「新对话」占位提示
+  const placeholder = $("chat").querySelector(".hint");
+  if (placeholder && !$("chat").querySelector(".msg")) placeholder.remove();
+
   pushMsg("user", "我", esc(q));
 
   const btn = $("btn-ask");
@@ -716,44 +927,30 @@ async function ask() {
 
   try {
     const body = { video_id: currentId, question: q };
+    if (currentSessionId) body.session_id = currentSessionId;
     if ($("use-position").checked && $("player").src) {
       body.current_ms = Math.floor($("player").currentTime * 1000);
     }
     const ans = await api("/api/ask", { method: "POST", body: JSON.stringify(body) });
+    if (ans.session_id) currentSessionId = ans.session_id;
 
-    const cites = (ans.citations || []).map((c) => `
-      <div class="cite">
-        <span class="ts-link" data-ms="${c.start_ms}">[${esc(c.label)}]</span>
-        <span class="txt">${esc(c.text.slice(0, 90))}…</span>
-      </div>`).join("");
-
-    // 引用自带的课件图：接口字段是 slide_idxs（数组），旧代码写的 c.slide_idx
-    // 根本不存在，拼出来的 URL 少了索引 → 实测 404，缩略图一直是坏的。
-    const thumbs = (ans.citations || [])
-      .filter((c) => (c.slide_idxs || []).length)
-      .slice(0, 4)
-      .map((c) => {
-        const idx = c.slide_idxs[0];
-        return `<img src="/api/slides/${currentId}/${idx}" alt="课件 ${idx}"
-          data-ms="${c.start_ms}" data-idx="${idx}" title="课件第 ${idx + 1} 帧 · 点击放大">`;
-      })
-      .join("");
-
-    const u = ans.usage || {};
-    const meta = `意图 ${ans.intent} · 前缀约 ${ans.prefix_tokens} tokens` +
-      (u.prompt_tokens ? ` · 输入 ${u.prompt_tokens}（缓存命中 ${u.cached_tokens ?? 0}，${
-        Math.round((u.cache_hit_rate || 0) * 100)}%）` : "");
-
-    pending.querySelector(".body").innerHTML =
-      linkifyTimestamps(md(ans.text)) +
-      (cites ? `<div class="cites">${cites}</div>` : "");
-    pending.querySelector(".meta-line")?.remove();
-    pending.insertAdjacentHTML("beforeend", `<div class="meta-line">${meta}</div>`);
-    if (thumbs) pending.insertAdjacentHTML("beforeend", `<div class="thumbs">${thumbs}</div>`);
-    if (u.cache_hit_rate === 0) {
-      pending.insertAdjacentHTML("beforeend",
+    pending.remove();
+    renderAssistantMessage(ans.text, {
+      intent: ans.intent,
+      citations: ans.citations,
+      usage: ans.usage,
+      prefix_tokens: ans.prefix_tokens,
+    });
+    if (ans.usage && ans.usage.cache_hit_rate === 0) {
+      const last = $("chat").lastElementChild;
+      last?.insertAdjacentHTML("beforeend",
         `<div class="meta-line">提示：本次未命中上下文缓存。整稿前缀必须保持稳定，否则成本会上升一个数量级。</div>`);
     }
+    // 首问之后标题会变，刷新一下下拉框（不重载消息，避免闪）
+    try {
+      const data = await api(`/api/sessions?video_id=${encodeURIComponent(currentId)}`);
+      renderSessionSelect(data.items || [], currentSessionId);
+    } catch (_) {}
   } catch (e) {
     pending.querySelector(".body").innerHTML = `<span class="err">${esc(e.message)}</span>`;
   } finally {
@@ -806,7 +1003,8 @@ async function openReader() {
 
   const html = md(notesDoc.markdown);
   const content = $("reader-content");
-  content.innerHTML = `<div class="inner md">${html}</div>`;
+  // md() 已包 .md；这里只负责阅读区的最大宽度与居中
+  content.innerHTML = `<div class="inner">${html}</div>`;
   // 先显示再建目录：容器还 display:none 时挂 IntersectionObserver，
   // 滚动高亮要等元素可见才首次触发，容易一闪或干脆不亮。
   $("reader").classList.remove("hidden");
@@ -1014,6 +1212,10 @@ $("btn-ask").onclick = ask;
 $("btn-notes").onclick = generateNotes;
 $("btn-read").onclick = openReader;
 $("btn-usage-refresh").onclick = loadUsage;
+$("btn-session-new").onclick = newSession;
+$("btn-session-rename").onclick = renameSession;
+$("btn-session-archive").onclick = archiveSession;
+$("session-select").onchange = () => openSession($("session-select").value);
 $("reader-close").onclick = closeReader;
 $("reader-regen").onclick = () => {
   closeReader();
@@ -1075,6 +1277,71 @@ document.addEventListener("keydown", (e) => {
 $("player").addEventListener("timeupdate", () => {
   $("player-clock").textContent = fmt($("player").currentTime * 1000);
 });
+
+/* ---------------------------------------------------------------- 列宽拖拽 */
+
+const COL_MIN = { lib: 180, ai: 360 };
+const COL_MAX = { lib: 420, ai: 900 };
+
+function applyColWidths(lib, ai) {
+  const main = document.querySelector("main");
+  if (lib != null) main.style.setProperty("--w-lib", `${Math.round(lib)}px`);
+  if (ai != null) main.style.setProperty("--w-ai", `${Math.round(ai)}px`);
+}
+
+function loadColWidths() {
+  try {
+    const saved = JSON.parse(localStorage.getItem("vedioai.cols") || "{}");
+    applyColWidths(saved.lib || null, saved.ai || null);
+  } catch (_) { /* ignore */ }
+}
+
+function saveColWidths() {
+  const cs = getComputedStyle(document.querySelector("main"));
+  const lib = parseFloat(cs.getPropertyValue("--w-lib"));
+  const ai = parseFloat(cs.getPropertyValue("--w-ai"));
+  localStorage.setItem("vedioai.cols", JSON.stringify({ lib, ai }));
+}
+
+function bindSplitter(el, which) {
+  el.addEventListener("mousedown", (e) => {
+    e.preventDefault();
+    const main = document.querySelector("main");
+    const startX = e.clientX;
+    const cs = getComputedStyle(main);
+    const start = parseFloat(cs.getPropertyValue(which === "lib" ? "--w-lib" : "--w-ai"));
+    el.classList.add("dragging");
+    document.body.classList.add("col-resizing");
+
+    const onMove = (ev) => {
+      // 左边拖条：向右拖 → 课程库变宽；右边拖条：向右拖 → AI 变窄（中栏吃掉）
+      const delta = ev.clientX - startX;
+      let next = which === "lib" ? start + delta : start - delta;
+      next = Math.max(COL_MIN[which], Math.min(COL_MAX[which], next));
+      // 保证中间栏至少还有约 280px，否则拖过头会把播放器挤没
+      const total = main.clientWidth;
+      const other = which === "lib"
+        ? parseFloat(getComputedStyle(main).getPropertyValue("--w-ai"))
+        : parseFloat(getComputedStyle(main).getPropertyValue("--w-lib"));
+      const maxForThis = total - other - 5 - 5 - 280;
+      next = Math.min(next, Math.max(COL_MIN[which], maxForThis));
+      applyColWidths(which === "lib" ? next : null, which === "ai" ? next : null);
+    };
+    const onUp = () => {
+      el.classList.remove("dragging");
+      document.body.classList.remove("col-resizing");
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      saveColWidths();
+    };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  });
+}
+
+loadColWidths();
+bindSplitter($("split-lib"), "lib");
+bindSplitter($("split-ai"), "ai");
 
 /* ---------------------------------------------------------------- 启动 */
 
