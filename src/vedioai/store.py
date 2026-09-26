@@ -24,7 +24,7 @@ from .schema import Chapter, Chunk, Segment, Slide, Video, VideoStatus
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -135,12 +135,37 @@ CREATE TABLE IF NOT EXISTS usage_log (
     peak              INTEGER NOT NULL DEFAULT 0
 );
 
+-- 问答会话。一门课可以有多个命名会话（「期中复习」「作业答疑」）。
+-- archived=1 表示归档：默认列表不显示，但仍可按 ID 打开。
+CREATE TABLE IF NOT EXISTS chat_sessions (
+    session_id  TEXT PRIMARY KEY,
+    video_id    TEXT NOT NULL,
+    title       TEXT NOT NULL DEFAULT '',
+    archived    INTEGER NOT NULL DEFAULT 0,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- 会话消息。role = user | assistant。
+-- meta 存助手侧的 citations / usage / intent 等 JSON，用户消息通常是 {}。
+CREATE TABLE IF NOT EXISTS chat_messages (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id  TEXT NOT NULL,
+    role        TEXT NOT NULL,
+    content     TEXT NOT NULL,
+    meta        TEXT NOT NULL DEFAULT '{}',
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (session_id) REFERENCES chat_sessions(session_id) ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_chunks_video  ON chunks(video_id, idx);
 CREATE INDEX IF NOT EXISTS idx_chapter_video ON chapters(video_id, idx);
 CREATE INDEX IF NOT EXISTS idx_slide_video   ON slides(video_id, idx);
 CREATE INDEX IF NOT EXISTS idx_seg_video     ON segments(video_id, idx);
 CREATE INDEX IF NOT EXISTS idx_usage_video   ON usage_log(video_id, at);
 CREATE INDEX IF NOT EXISTS idx_usage_at      ON usage_log(at);
+CREATE INDEX IF NOT EXISTS idx_session_video ON chat_sessions(video_id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_msg_session   ON chat_messages(session_id, id);
 """
 
 
@@ -663,5 +688,159 @@ class Store:
             "by_day": by_day,
         }
 
+    # ------------------------------------------------------------------ 会话
+
+    def create_session(self, video_id: str, title: str = "") -> dict:
+        """新建会话。session_id 用短 hex，够本地用、也好读。"""
+        import secrets
+
+        session_id = secrets.token_hex(8)
+        self.conn.execute(
+            """
+            INSERT INTO chat_sessions (session_id, video_id, title)
+            VALUES (?, ?, ?)
+            """,
+            (session_id, video_id, (title or "").strip()),
+        )
+        self.conn.commit()
+        return self.get_session(session_id)  # type: ignore[return-value]
+
+    def get_session(self, session_id: str) -> dict | None:
+        row = self.conn.execute(
+            "SELECT * FROM chat_sessions WHERE session_id = ?", (session_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def list_sessions(self, video_id: str, *, include_archived: bool = False) -> list[dict]:
+        """按最近活跃排序。默认隐藏已归档。"""
+        sql = """
+            SELECT s.*,
+                   (SELECT COUNT(*) FROM chat_messages m WHERE m.session_id = s.session_id) AS message_count,
+                   (SELECT content FROM chat_messages m
+                    WHERE m.session_id = s.session_id AND m.role = 'user'
+                    ORDER BY m.id LIMIT 1) AS first_question
+            FROM chat_sessions s
+            WHERE s.video_id = ?
+        """
+        params: list = [video_id]
+        if not include_archived:
+            sql += " AND s.archived = 0"
+        sql += " ORDER BY s.updated_at DESC, s.created_at DESC"
+        rows = self.conn.execute(sql, params).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            # 没起名时用首问当展示标题，但不写回库——用户改名才能真正落盘
+            if not d.get("title") and d.get("first_question"):
+                d["display_title"] = _short_title(d["first_question"])
+            else:
+                d["display_title"] = d.get("title") or "新对话"
+            out.append(d)
+        return out
+
+    def update_session(
+        self,
+        session_id: str,
+        *,
+        title: str | None = None,
+        archived: bool | None = None,
+        touch: bool = False,
+    ) -> dict | None:
+        session = self.get_session(session_id)
+        if session is None:
+            return None
+        fields: list[str] = []
+        params: list = []
+        if title is not None:
+            fields.append("title = ?")
+            params.append(title.strip())
+        if archived is not None:
+            fields.append("archived = ?")
+            params.append(1 if archived else 0)
+        if touch or fields:
+            fields.append("updated_at = datetime('now')")
+        if not fields:
+            return session
+        params.append(session_id)
+        self.conn.execute(
+            f"UPDATE chat_sessions SET {', '.join(fields)} WHERE session_id = ?",
+            params,
+        )
+        self.conn.commit()
+        return self.get_session(session_id)
+
+    def delete_session(self, session_id: str) -> bool:
+        """硬删除会话及其消息（FK CASCADE）。"""
+        cur = self.conn.execute(
+            "DELETE FROM chat_sessions WHERE session_id = ?", (session_id,)
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def add_message(
+        self,
+        session_id: str,
+        role: str,
+        content: str,
+        *,
+        meta: dict | None = None,
+    ) -> dict:
+        cur = self.conn.execute(
+            """
+            INSERT INTO chat_messages (session_id, role, content, meta)
+            VALUES (?, ?, ?, ?)
+            """,
+            (session_id, role, content, json.dumps(meta or {}, ensure_ascii=False)),
+        )
+        # 任何新消息都把会话顶到列表最前
+        self.conn.execute(
+            "UPDATE chat_sessions SET updated_at = datetime('now') WHERE session_id = ?",
+            (session_id,),
+        )
+        self.conn.commit()
+        row = self.conn.execute(
+            "SELECT * FROM chat_messages WHERE id = ?", (cur.lastrowid,)
+        ).fetchone()
+        return _message_row(row)
+
+    def get_messages(self, session_id: str, *, limit: int | None = None) -> list[dict]:
+        """按时间正序返回。limit 表示「最近 N 条」，仍按正序排好再给调用方。"""
+        if limit is None:
+            rows = self.conn.execute(
+                """
+                SELECT * FROM chat_messages
+                WHERE session_id = ? ORDER BY id
+                """,
+                (session_id,),
+            ).fetchall()
+        else:
+            # 先倒序取最近 N 条，再翻正——这样多轮上下文取「尾巴」时不需要全表扫描
+            rows = self.conn.execute(
+                """
+                SELECT * FROM (
+                    SELECT * FROM chat_messages
+                    WHERE session_id = ? ORDER BY id DESC LIMIT ?
+                ) ORDER BY id
+                """,
+                (session_id, limit),
+            ).fetchall()
+        return [_message_row(r) for r in rows]
+
     def close(self) -> None:
         self.conn.close()
+
+
+def _message_row(row: sqlite3.Row) -> dict:
+    d = dict(row)
+    try:
+        d["meta"] = json.loads(d.get("meta") or "{}")
+    except json.JSONDecodeError:
+        d["meta"] = {}
+    return d
+
+
+def _short_title(text: str, limit: int = 28) -> str:
+    text = (text or "").strip().replace("\n", " ")
+    if len(text) <= limit:
+        return text or "新对话"
+    return text[: limit - 1] + "…"

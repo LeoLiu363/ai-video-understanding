@@ -49,6 +49,18 @@ class AskRequest(BaseModel):
     question: str
     current_ms: int | None = None
     top_k: int | None = None
+    # 可选：带上会话 ID 就进多轮 + 落库；不带则仍是单轮（CLI / 评估兼容）
+    session_id: str | None = None
+
+
+class SessionCreateRequest(BaseModel):
+    video_id: str
+    title: str = ""
+
+
+class SessionUpdateRequest(BaseModel):
+    title: str | None = None
+    archived: bool | None = None
 
 
 class NotesRequest(BaseModel):
@@ -217,11 +229,67 @@ def create_app(cfg: Config | None = None) -> FastAPI:
                 embedder=embedder, reranker=reranker,
             )
             answer = service.ask(
-                req.video_id, req.question, current_ms=req.current_ms, top_k=req.top_k
+                req.video_id,
+                req.question,
+                current_ms=req.current_ms,
+                top_k=req.top_k,
+                session_id=req.session_id,
             )
             return answer.to_dict()
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
         finally:
             llm.close()
+
+    # ------------------------------------------------------------------ 会话
+
+    @app.get("/api/sessions")
+    def list_sessions(video_id: str, include_archived: bool = False) -> dict:
+        if store.get_video(video_id) is None:
+            raise HTTPException(404, "课程不存在")
+        return {
+            "items": store.list_sessions(video_id, include_archived=include_archived)
+        }
+
+    @app.post("/api/sessions")
+    def create_session(req: SessionCreateRequest) -> dict:
+        if store.get_video(req.video_id) is None:
+            raise HTTPException(404, "课程不存在")
+        return store.create_session(req.video_id, title=req.title)
+
+    @app.get("/api/sessions/{session_id}")
+    def get_session(session_id: str) -> dict:
+        session = store.get_session(session_id)
+        if session is None:
+            raise HTTPException(404, "会话不存在")
+        messages = store.get_messages(session_id)
+        first = next((m["content"] for m in messages if m["role"] == "user"), "")
+        from .store import _short_title
+
+        display = session.get("title") or _short_title(first)
+        return {
+            **session,
+            "display_title": display,
+            "messages": messages,
+            "message_count": len(messages),
+        }
+
+    @app.patch("/api/sessions/{session_id}")
+    def update_session(session_id: str, req: SessionUpdateRequest) -> dict:
+        if req.title is None and req.archived is None:
+            raise HTTPException(400, "没有可更新的字段")
+        updated = store.update_session(
+            session_id, title=req.title, archived=req.archived
+        )
+        if updated is None:
+            raise HTTPException(404, "会话不存在")
+        return updated
+
+    @app.delete("/api/sessions/{session_id}")
+    def delete_session(session_id: str) -> dict:
+        if not store.delete_session(session_id):
+            raise HTTPException(404, "会话不存在")
+        return {"ok": True}
 
     @app.post("/api/notes")
     def notes(req: NotesRequest) -> dict:

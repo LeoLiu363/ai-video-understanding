@@ -547,6 +547,90 @@ def test_http_usage_ledger_endpoint(cfg: Config, video_file: Path):
         assert {r["kind"] for r in one["by_kind"]} == {"ask", "summarize", "asr"}
 
 
+def test_http_session_crud_and_ask_persists(cfg: Config, video_file: Path, monkeypatch):
+    """会话 API：新建 / 列表 / 改名 / 归档；带 session 提问会落库并可回读。
+
+    不依赖真实密钥：给 cfg 塞一个假 key 过门禁，AskService 内部客户端换成桩。
+    """
+    from fastapi.testclient import TestClient
+
+    from vedioai.llm.client import Reply, Usage
+    from vedioai.server import create_app
+
+    cfg.llm.api_key = "test-key-not-used"
+    store = Store(cfg.db_path)
+    vid = IngestPipeline(cfg, store, llm=None, asr=StubASR()).run(
+        video_file, skip_summary=True
+    ).video_id
+    store.close()
+
+    from vedioai import ask as ask_mod
+
+    real_ask = ask_mod.AskService.ask
+
+    def fake_ask(self, video_id, question, **kw):
+        class Fake:
+            def ask(self, prefix, q, **k):
+                return Reply(
+                    text=f"关于「{question}」的回答",
+                    usage=Usage(prompt_tokens=50, cached_tokens=40, completion_tokens=5),
+                    model="deepseek-flash",
+                )
+
+            def close(self):
+                pass
+
+        self.client = Fake()
+        self.vision = None
+        return real_ask(self, video_id, question, **kw)
+
+    monkeypatch.setattr(ask_mod.AskService, "ask", fake_ask)
+
+    # from_llm_config 会真的构造客户端；假 key 也够（只要不发请求）。
+    # make_llm 在每次 ask 时调用——我们的 fake_ask 会立刻换掉 client。
+    app = create_app(cfg)
+    with TestClient(app) as client:
+        empty = client.get("/api/sessions", params={"video_id": vid}).json()
+        assert empty["items"] == []
+
+        created = client.post(
+            "/api/sessions", json={"video_id": vid, "title": "期中复习"}
+        ).json()
+        sid = created["session_id"]
+        assert created["title"] == "期中复习"
+
+        listed = client.get("/api/sessions", params={"video_id": vid}).json()["items"]
+        assert len(listed) == 1
+
+        ans = client.post(
+            "/api/ask",
+            json={"video_id": vid, "question": "什么是 Root？", "session_id": sid},
+        ).json()
+        assert ans["session_id"] == sid
+        assert "Root" in ans["text"]
+
+        detail = client.get(f"/api/sessions/{sid}").json()
+        assert detail["message_count"] == 2
+        assert detail["messages"][0]["role"] == "user"
+        assert detail["messages"][1]["role"] == "assistant"
+
+        renamed = client.patch(
+            f"/api/sessions/{sid}", json={"title": "Root 专题"}
+        ).json()
+        assert renamed["title"] == "Root 专题"
+        client.patch(f"/api/sessions/{sid}", json={"archived": True})
+        assert client.get("/api/sessions", params={"video_id": vid}).json()["items"] == []
+        assert len(
+            client.get(
+                "/api/sessions",
+                params={"video_id": vid, "include_archived": True},
+            ).json()["items"]
+        ) == 1
+
+        assert client.delete(f"/api/sessions/{sid}").json()["ok"] is True
+        assert client.get(f"/api/sessions/{sid}").status_code == 404
+
+
 def test_scaffold_generates_40_slots(cfg: Config, video_file: Path, tmp_path: Path):
     from evals.run_eval import scaffold
 

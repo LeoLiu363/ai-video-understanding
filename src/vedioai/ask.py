@@ -39,6 +39,11 @@ _MAX_CITATIONS = 12
 
 # 前缀超过这个 token 预算才退化到大纲前缀
 PREFIX_TOKEN_BUDGET = 400_000
+# 多轮历史挂在「问题」侧（前缀之后），保住上下文缓存。
+# 只取最近若干条，避免历史把窗口吃光；偶数 = 完整的「问+答」对。
+HISTORY_MESSAGE_LIMIT = 12
+# 单条历史消息写入提示词时的正文上限（字符）。
+HISTORY_MSG_CHARS = 800
 
 
 @dataclass
@@ -73,6 +78,8 @@ class Answer:
     prefix_tokens: int
     used_outline: bool
     images: list[str] = field(default_factory=list)
+    session_id: str = ""
+    history_turns: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -88,6 +95,8 @@ class Answer:
             },
             "prefix_tokens": self.prefix_tokens,
             "used_outline": self.used_outline,
+            "session_id": self.session_id,
+            "history_turns": self.history_turns,
         }
 
 
@@ -124,6 +133,8 @@ class AskService:
         current_ms: int | None = None,
         within_chapter: Chapter | None = None,
         top_k: int | None = None,
+        session_id: str | None = None,
+        persist: bool = True,
     ) -> Answer:
         video = self.store.get_video(video_id)
         if video is None:
@@ -134,12 +145,25 @@ class AskService:
         if not chunks:
             raise ValueError("该课程尚未完成入库（没有转写内容）")
 
+        # 会话校验：必须属于本课。空 session_id = 匿名单轮（CLI / 评估用）。
+        session = None
+        history: list[dict] = []
+        if session_id:
+            session = self.store.get_session(session_id)
+            if session is None:
+                raise ValueError(f"会话不存在：{session_id}")
+            if session["video_id"] != video_id:
+                raise ValueError("会话不属于该课程")
+            # 取最近 N 条作为多轮上下文；本轮问题还没入库，所以全是「上一轮及更早」
+            history = self.store.get_messages(session_id, limit=HISTORY_MESSAGE_LIMIT)
+
         intent = self._classify(question)
 
         prefix, prefix_tokens, used_outline = self._get_prefix(video_id, video, chapters, chunks)
         prompt = prompts.QA_GLOBAL if intent == "global" else prompts.QA_LOCAL
         full_prompt = f"{prompt}\n\n---\n{prefix}"
 
+        # 检索仍只看本问——历史里的旧话题不应劫持本轮召回
         hits = self.retriever.search(
             video_id, question, top_k=top_k, time_bias_ms=current_ms, within_chapter=within_chapter
         )
@@ -152,16 +176,20 @@ class AskService:
             if intent == "visual" and self.vision is not None:
                 image_paths = self._evidence_images(video_id, hits)
                 if image_paths:
-                    question_text = self._build_question(question, current_ms, within_chapter, None)
+                    question_text = self._build_question(
+                        question, current_ms, within_chapter, None, history=history
+                    )
                     reply = self.vision.ask_with_images(full_prompt, question_text, image_paths)
                     images = [str(p) for p in image_paths]
 
             if reply is None:
-                question_text = self._build_question(question, current_ms, within_chapter, hits)
+                question_text = self._build_question(
+                    question, current_ms, within_chapter, hits, history=history
+                )
                 reply = self.client.ask(full_prompt, question_text)
 
         citations = self._build_citations(video_id, chapters, chunks, hits, reply.text)
-        return Answer(
+        answer = Answer(
             text=reply.text,
             citations=citations,
             intent=intent,
@@ -169,7 +197,35 @@ class AskService:
             prefix_tokens=prefix_tokens,
             used_outline=used_outline,
             images=images,
+            session_id=session_id or "",
+            history_turns=sum(1 for m in history if m["role"] == "user"),
         )
+
+        # 落库：先用户后助手。评估 / CLI 默认也可以带 session；persist=False 留给干跑。
+        if session is not None and persist:
+            self.store.add_message(session_id, "user", question)
+            self.store.add_message(
+                session_id,
+                "assistant",
+                reply.text,
+                meta={
+                    "intent": intent,
+                    "citations": [c.to_dict() for c in citations],
+                    "usage": {
+                        "prompt_tokens": reply.usage.prompt_tokens,
+                        "completion_tokens": reply.usage.completion_tokens,
+                        "cached_tokens": reply.usage.cached_tokens,
+                        "cache_hit_rate": round(reply.usage.cache_hit_rate, 3),
+                    },
+                    "prefix_tokens": prefix_tokens,
+                    "images": images,
+                },
+            )
+            # 首问自动起名：只在标题仍空时写一次，之后用户改名不被覆盖
+            if not (session.get("title") or "").strip():
+                self.store.update_session(session_id, title=_auto_title(question))
+
+        return answer
 
     def warm(self, video_id: str) -> int:
         """预生成前缀，让第一次提问就命中缓存。"""
@@ -221,9 +277,25 @@ class AskService:
         current_ms: int | None,
         within_chapter: Chapter | None,
         hits: list | None,
+        *,
+        history: list[dict] | None = None,
     ) -> str:
-        """问题侧才放变化内容。"""
-        parts = [f"用户问题：{question}"]
+        """问题侧才放变化内容。
+
+        多轮历史必须挂在这里（前缀之后），绝不能塞进稳定前缀——否则每次对话
+        都会打穿 DeepSeek 的上下文缓存，成本立刻升一个数量级。
+        """
+        parts: list[str] = []
+        if history:
+            parts.append("【此前对话】（仅供理解指代与追问，课程事实仍以材料为准）")
+            for msg in history:
+                role = "用户" if msg["role"] == "user" else "助手"
+                body = (msg.get("content") or "").strip()
+                if len(body) > HISTORY_MSG_CHARS:
+                    body = body[: HISTORY_MSG_CHARS - 1] + "…"
+                parts.append(f"{role}：{body}")
+            parts.append("")  # 空行分隔本问
+        parts.append(f"用户问题：{question}")
         if current_ms is not None:
             parts.append(f"（用户当前播放到 {ms_to_hms(current_ms)}，仅作参考，不代表问题范围）")
         if within_chapter is not None:
@@ -320,3 +392,11 @@ def _nearest_chunk(chunks: list[Chunk], ms: int) -> Chunk | None:
         return None
     best = min(chunks, key=lambda c: 0 if c.start_ms <= ms <= c.end_ms else abs(c.start_ms - ms))
     return best
+
+
+def _auto_title(question: str, limit: int = 28) -> str:
+    """用首问给会话起个可读的名字。"""
+    text = (question or "").strip().replace("\n", " ")
+    if len(text) <= limit:
+        return text or "新对话"
+    return text[: limit - 1] + "…"

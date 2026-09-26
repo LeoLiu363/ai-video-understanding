@@ -1753,3 +1753,154 @@ def test_backfill_asr_usage_is_grounded_and_idempotent(store: Store, sample_vide
     assert _backfill_asr_usage(store) == 0
     assert store.usage_summary("v1")["calls"] == 1
 
+
+# ------------------------------------------------------------------ 会话
+
+
+def test_session_crud_and_messages(store: Store, sample_video: Video):
+    """一门课可有多个命名会话；消息按时间正序；归档后默认列表隐藏。"""
+    a = store.create_session("v1", title="期中复习")
+    b = store.create_session("v1")
+    assert a["session_id"] != b["session_id"]
+    assert a["title"] == "期中复习"
+    assert b["title"] == ""
+
+    store.add_message(a["session_id"], "user", "什么是快速排序？")
+    store.add_message(
+        a["session_id"],
+        "assistant",
+        "一种分治排序。",
+        meta={"intent": "local", "citations": []},
+    )
+    store.add_message(b["session_id"], "user", "作业第三题怎么做？")
+
+    msgs = store.get_messages(a["session_id"])
+    assert [m["role"] for m in msgs] == ["user", "assistant"]
+    assert msgs[1]["meta"]["intent"] == "local"
+
+    listed = store.list_sessions("v1")
+    assert len(listed) == 2
+    ids = {s["session_id"] for s in listed}
+    assert ids == {a["session_id"], b["session_id"]}
+    untitled = next(s for s in listed if s["session_id"] == b["session_id"])
+    assert "作业" in untitled["display_title"]
+
+    store.update_session(a["session_id"], archived=True)
+    assert len(store.list_sessions("v1")) == 1
+    assert len(store.list_sessions("v1", include_archived=True)) == 2
+
+    assert store.delete_session(a["session_id"]) is True
+    assert store.get_messages(a["session_id"]) == [], "级联删除必须清掉消息"
+
+
+def test_build_question_puts_history_after_prefix_marker():
+    """多轮历史必须出现在「用户问题」之前、作为问题侧可变部分。
+
+    这是保住前缀缓存的硬约束：历史绝不能进稳定前缀。
+    """
+    from vedioai.ask import AskService
+
+    history = [
+        {"role": "user", "content": "什么是 ptrace？"},
+        {"role": "assistant", "content": "一种进程跟踪机制。"},
+    ]
+    text = AskService._build_question(
+        None,  # type: ignore[arg-type]
+        "那 attach 呢？",
+        None,
+        None,
+        None,
+        history=history,
+    )
+    assert "【此前对话】" in text
+    assert "什么是 ptrace？" in text
+    assert text.index("【此前对话】") < text.index("用户问题：那 attach 呢？")
+
+
+def test_ask_with_session_persists_and_feeds_history(store: Store, sample_video: Video):
+    """带 session_id 提问：落库双方消息，第二轮能看见第一轮。"""
+    from vedioai.ask import AskService
+    from vedioai.config import Config
+    from vedioai.llm.client import Reply, Usage
+    from vedioai.schema import Chunk
+
+    store.replace_chunks(
+        "v1",
+        [
+            Chunk(
+                chunk_id="v1-c0000",
+                idx=0,
+                start_ms=0,
+                end_ms=10_000,
+                text="快速排序是一种分治算法",
+                ocr_text="",
+            )
+        ],
+    )
+    session = store.create_session("v1")
+    seen_questions: list[str] = []
+
+    class FakeClient:
+        def ask(self, prefix, question, **kw):
+            seen_questions.append(question)
+            return Reply(
+                text=f"答：{(question.split('用户问题：')[-1])[:20]}",
+                usage=Usage(prompt_tokens=100, cached_tokens=80, completion_tokens=10),
+                model="deepseek-flash",
+            )
+
+        def close(self):
+            pass
+
+    service = AskService(Config(), store, FakeClient(), vision=None)
+
+    a1 = service.ask("v1", "什么是快速排序？", session_id=session["session_id"])
+    assert a1.session_id == session["session_id"]
+    assert a1.history_turns == 0
+    msgs = store.get_messages(session["session_id"])
+    assert len(msgs) == 2
+    assert msgs[0]["role"] == "user" and "快速排序" in msgs[0]["content"]
+    assert "快速排序" in (store.get_session(session["session_id"])["title"] or "")
+
+    a2 = service.ask("v1", "那它最坏复杂度呢？", session_id=session["session_id"])
+    assert a2.history_turns == 1
+    assert "【此前对话】" in seen_questions[1]
+    assert "什么是快速排序？" in seen_questions[1]
+    assert "那它最坏复杂度呢？" in seen_questions[1]
+    assert "【此前对话】" not in seen_questions[0]
+
+
+def test_ask_rejects_session_from_another_video(store: Store, sample_video: Video):
+    from vedioai.ask import AskService
+    from vedioai.config import Config
+    from vedioai.schema import Chunk, Video, VideoStatus
+
+    store.replace_chunks(
+        "v1",
+        [Chunk(chunk_id="v1-c0000", idx=0, start_ms=0, end_ms=1000, text="x", ocr_text="")],
+    )
+    other = Video(
+        video_id="v2", path="D:/b.mp4", title="别的课",
+        duration_ms=1000, status=VideoStatus.READY,
+    )
+    store.upsert_video(other)
+    session = store.create_session("v2", title="别课的会话")
+
+    service = AskService(Config(), store, client=None, vision=None)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="不属于"):
+        service.ask("v1", "你好", session_id=session["session_id"])
+
+
+def test_qa_prompts_allow_labeled_extension_but_keep_grounding():
+    """问答允许「拓展」，但课内结论仍须 grounding；摘要提示词不许拓展。"""
+    from vedioai.llm import prompts
+
+    assert "> **拓展**" in prompts.QA_LOCAL
+    assert "> **拓展**" in prompts.QA_GLOBAL
+    assert "课程材料中没有提到" in prompts.QA_LOCAL
+    assert "不得**再标" in prompts.QA_LOCAL or "不得" in prompts.QA_LOCAL
+    # 入库摘要仍是纯材料，不能掺拓展，否则笔记会把外部知识写进课内文档
+    assert "不要补充外部知识" in prompts.CHUNK_SUMMARY
+    assert "拓展" not in prompts.SYSTEM_TUTOR
+    assert "拓展" in prompts.SYSTEM_QA
+

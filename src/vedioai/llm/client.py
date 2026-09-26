@@ -222,8 +222,10 @@ class LLMClient:
 
     def ask(self, prefix: str, question: str, *, model: str | None = None) -> Reply:
         """稳定前缀 + 变化问题。前缀在前，问题在后，才能命中缓存。"""
+        from . import prompts
+
         messages = [
-            {"role": "system", "content": "你是一位严谨的课程助教，只依据提供的材料回答。"},
+            {"role": "system", "content": prompts.SYSTEM_QA},
             {"role": "user", "content": prefix},
             {"role": "user", "content": question},
         ]
@@ -237,6 +239,8 @@ class LLMClient:
         *,
         model: str | None = None,
     ) -> Reply:
+        from . import prompts
+
         content: list[dict] = [{"type": "text", "text": f"{prefix}\n\n{question}"}]
         for path in image_paths:
             try:
@@ -244,7 +248,7 @@ class LLMClient:
             except Exception as exc:  # noqa: BLE001
                 log.warning("读取图片失败 %s: %s", path, exc)
         messages = [
-            {"role": "system", "content": "你是一位严谨的课程助教，只依据提供的材料和图片回答。"},
+            {"role": "system", "content": prompts.SYSTEM_QA},
             {"role": "user", "content": content},
         ]
         return self.chat(messages, model=model)
