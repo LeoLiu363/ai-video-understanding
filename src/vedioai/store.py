@@ -562,6 +562,45 @@ class Store:
         # FTS5 的 bm25() 越小越相关，转成越大越相关
         return [(r["chunk_id"], -float(r["score"])) for r in rows]
 
+    def search_segments(
+        self, video_id: str, query: str, top_k: int = 20
+    ) -> list[dict]:
+        """课内句级关键词搜索（segments_fts）。
+
+        返回 [{idx, start_ms, end_ms, text, score}, ...]，按相关度降序。
+        供界面搜索面板与跳转使用；与 search_keyword（块级）互补。
+        """
+        terms = query_terms(query)
+        if not terms:
+            return []
+        match_expr = " OR ".join(terms)
+        try:
+            rows = self.conn.execute(
+                """
+                SELECT s.idx, s.start_ms, s.end_ms, s.text,
+                       bm25(segments_fts) AS score
+                FROM segments_fts
+                JOIN segments s
+                  ON s.video_id = segments_fts.video_id AND s.idx = segments_fts.idx
+                WHERE segments_fts MATCH ? AND segments_fts.video_id = ?
+                ORDER BY score
+                LIMIT ?
+                """,
+                (match_expr, video_id, top_k),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return []
+        return [
+            {
+                "idx": int(r["idx"]),
+                "start_ms": int(r["start_ms"]),
+                "end_ms": int(r["end_ms"]),
+                "text": r["text"] or "",
+                "score": -float(r["score"]),
+            }
+            for r in rows
+        ]
+
     # ------------------------------------------------------------------ 用量账
 
     def record_usage(

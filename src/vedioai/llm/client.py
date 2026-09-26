@@ -231,6 +231,24 @@ class LLMClient:
         ]
         return self.chat(messages, model=model)
 
+    def ask_stream(self, prefix: str, question: str, *, model: str | None = None):
+        """与 ``ask`` 相同的消息结构，但以生成器产出文本增量，最后 yield Reply。
+
+        产量约定：
+          - ``("delta", str)``：正文增量（可能为空串，调用方可忽略）
+          - ``("done", Reply)``：完整回复（含 usage）；只出现一次，且为最后一项
+
+        前缀仍是独立的 user 消息，与非流式一致，保住 DeepSeek 上下文缓存。
+        """
+        from . import prompts
+
+        messages = [
+            {"role": "system", "content": prompts.SYSTEM_QA},
+            {"role": "user", "content": prefix},
+            {"role": "user", "content": question},
+        ]
+        yield from self.chat_stream(messages, model=model)
+
     def ask_with_images(
         self,
         prefix: str,
@@ -257,6 +275,98 @@ class LLMClient:
         self._client.close()
 
     # --------------------------------------------------------------- private
+
+    def chat_stream(
+        self,
+        messages: list[dict],
+        *,
+        model: str | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        thinking: bool | None = None,
+    ):
+        """流式对话。产量见 ``ask_stream``。"""
+        payload = {
+            "model": model or self.model,
+            "messages": messages,
+            "temperature": self.temperature if temperature is None else temperature,
+            "max_tokens": max_tokens or self.max_tokens,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+        effective = self.thinking if thinking is None else thinking
+        if effective is not None and self.supports_thinking:
+            payload["thinking"] = {"type": "enabled" if effective else "disabled"}
+
+        url = f"{self.base_url}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+        }
+        text_parts: list[str] = []
+        usage = Usage()
+        finish_reason = ""
+        try:
+            with self._client.stream("POST", url, json=payload, headers=headers) as resp:
+                if resp.status_code >= 400:
+                    body = resp.read().decode("utf-8", errors="replace")[:500]
+                    raise LLMError(f"HTTP {resp.status_code}: {body}")
+                for line in resp.iter_lines():
+                    if not line:
+                        continue
+                    if line.startswith(":"):
+                        continue
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
+                    choices = chunk.get("choices") or []
+                    if choices:
+                        delta = choices[0].get("delta") or {}
+                        piece = delta.get("content") or ""
+                        if isinstance(piece, list):
+                            piece = "".join(
+                                p.get("text", "") for p in piece if isinstance(p, dict)
+                            )
+                        if piece:
+                            text_parts.append(piece)
+                            yield ("delta", piece)
+                        fr = choices[0].get("finish_reason")
+                        if fr:
+                            finish_reason = str(fr)
+                    raw_u = chunk.get("usage")
+                    if isinstance(raw_u, dict) and raw_u:
+                        cached = 0
+                        for key in ("prompt_cache_hit_tokens", "cached_tokens"):
+                            if key in raw_u:
+                                cached = int(raw_u.get(key) or 0)
+                                break
+                        if not cached and isinstance(raw_u.get("prompt_tokens_details"), dict):
+                            cached = int(raw_u["prompt_tokens_details"].get("cached_tokens") or 0)
+                        usage = Usage(
+                            prompt_tokens=int(raw_u.get("prompt_tokens") or 0),
+                            completion_tokens=int(raw_u.get("completion_tokens") or 0),
+                            cached_tokens=cached,
+                            total_tokens=int(raw_u.get("total_tokens") or 0),
+                        )
+        except httpx.HTTPError as exc:
+            raise LLMError(f"流式调用失败（{payload['model']}）：{exc}") from exc
+
+        reply = Reply(
+            text="".join(text_parts).strip(),
+            usage=usage,
+            model=payload["model"],
+            finish_reason=finish_reason or "stop",
+            reasoning_chars=0,
+        )
+        self._notify_usage(reply)
+        yield ("done", reply)
 
     def _post(self, payload: dict, retries: int = 3) -> Reply:
         url = f"{self.base_url}/chat/completions"

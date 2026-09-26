@@ -147,6 +147,47 @@
   .hint { color: var(--muted); font-size: 12px; }
   .hidden { display: none !important; }
 
+  .dropzone {
+    margin-top: 8px; padding: 10px; border: 1px dashed var(--line); border-radius: 8px;
+    text-align: center; color: var(--muted); font-size: 12px; cursor: pointer;
+  }
+  .dropzone.drag { border-color: var(--accent); color: var(--accent); background: #121820; }
+  .lib-item { position: relative; }
+  .lib-item .del {
+    position: absolute; right: 8px; top: 8px; opacity: 0; padding: 2px 6px; font-size: 12px;
+  }
+  .lib-item:hover .del { opacity: 1; }
+  .series-head {
+    padding: 8px 12px 4px; font-size: 11px; color: var(--muted); letter-spacing: .4px;
+    text-transform: none; border-top: 1px solid var(--line);
+  }
+  .series-ask {
+    display: flex; gap: 6px; padding: 8px 12px; border-bottom: 1px solid var(--line);
+  }
+  .series-ask input { flex: 1; min-width: 0; }
+
+  .player-tools { display: flex; gap: 4px; padding: 8px 12px 0; }
+  .player-tools button { padding: 4px 10px; font-size: 12px; border-radius: 999px; }
+  .player-tools button.on { background: var(--accent); color: #06101f; border-color: var(--accent); }
+  #transcript, #search-panel {
+    max-height: 28vh; overflow: auto; padding: 8px 12px 12px; font-size: 13px;
+  }
+  .seg-line {
+    padding: 4px 6px; border-radius: 6px; cursor: pointer; display: flex; gap: 8px;
+  }
+  .seg-line:hover { background: var(--panel-2); }
+  .seg-line.active { background: #1a2434; outline: 1px solid var(--accent); }
+  .seg-line .ts { color: var(--accent); font-variant-numeric: tabular-nums; min-width: 48px; }
+  .seg-line.selected { background: #2a2210; }
+  .search-bar { display: flex; gap: 6px; padding: 0 12px 8px; }
+  .search-bar input { flex: 1; }
+  .fix-bar {
+    display: none; gap: 6px; align-items: center; padding: 6px 12px;
+    background: #1a1810; border-bottom: 1px solid var(--line); font-size: 12.5px;
+  }
+  .fix-bar.show { display: flex; }
+  .fix-bar input { width: 120px; }
+
   /* ------------------------------------------------ 渲染后的 Markdown */
   .md { font-size: 14px; }
   .md > *:first-child { margin-top: 0; }
@@ -287,13 +328,21 @@
       </div>
       <div class="row" style="margin-top:8px">
         <button class="primary" id="btn-ingest" style="flex:1">入库</button>
+        <label class="ghost" style="padding:8px 12px;cursor:pointer;border:1px solid var(--line);border-radius:8px">
+          选文件<input type="file" id="ingest-file" accept="video/*,.mkv,.flv,.ts" hidden />
+        </label>
         <button class="ghost" id="btn-refresh" title="刷新">刷新</button>
       </div>
+      <div id="dropzone" class="dropzone">也可把视频拖到这里（填入本机路径）</div>
       <div id="ingest-progress" class="hidden" style="margin-top:10px">
         <div class="progress"><i id="ingest-bar"></i></div>
         <div class="status-line" id="ingest-status"></div>
       </div>
       <div id="ingest-error" class="err" style="margin-top:6px"></div>
+    </div>
+    <div id="series-ask-bar" class="series-ask hidden">
+      <input id="series-q" placeholder="对本系列跨课提问…" />
+      <button class="ghost" id="btn-series-ask">跨课问</button>
     </div>
     <div id="library"></div>
   </section>
@@ -303,7 +352,9 @@
   <!-- ---------------------------------------------------------- 播放器 -->
   <section class="col" id="col-player">
     <div class="player-wrap">
-      <video id="player" controls preload="metadata"></video>
+      <video id="player" controls preload="metadata">
+        <track id="subtitle-track" kind="subtitles" srclang="zh" label="转写" default />
+      </video>
     </div>
     <div class="player-meta">
       <strong id="video-title">未选择课程</strong>
@@ -311,8 +362,32 @@
       <span class="spacer" style="flex:1"></span>
       <span id="player-clock"></span>
     </div>
-    <div class="col-head">章节</div>
-    <div id="chapters" class="pad hint">入库完成后显示章节。</div>
+    <div class="player-tools">
+      <button id="tab-chapters" class="on">章节</button>
+      <button id="tab-transcript">转写</button>
+      <button id="tab-search">搜索</button>
+    </div>
+    <div id="fix-bar" class="fix-bar">
+      <span>纠正选中词：</span>
+      <code id="fix-wrong"></code>
+      <span>→</span>
+      <input id="fix-right" placeholder="正确写法" />
+      <button class="primary" id="btn-fix-apply">写入术语表</button>
+      <button class="ghost" id="btn-fix-cancel">取消</button>
+    </div>
+    <div id="panel-chapters">
+      <div id="chapters" class="pad hint">入库完成后显示章节。</div>
+    </div>
+    <div id="panel-transcript" class="hidden">
+      <div id="transcript" class="hint">打开课程后显示同步转写。</div>
+    </div>
+    <div id="panel-search" class="hidden">
+      <div class="search-bar">
+        <input id="search-q" placeholder="课内关键词…" />
+        <button class="ghost" id="btn-search">搜索</button>
+      </div>
+      <div id="search-panel" class="hint">输入关键词查找本课转写。</div>
+    </div>
   </section>
 
   <div class="splitter" id="split-ai" title="拖动调整 AI 面板宽度"></div>
@@ -636,31 +711,95 @@ async function loadHealth() {
 
 /* ---------------------------------------------------------------- 课程库 */
 
+let currentSeriesId = null;
+let transcriptSegs = [];
+
 async function loadLibrary() {
   const data = await api("/api/library");
   const box = $("library");
   if (!data.items.length) {
-    box.innerHTML = `<div class="pad hint">课程库为空。粘贴视频路径后点「入库」。</div>`;
+    box.innerHTML = `<div class="pad hint">课程库为空。粘贴路径、选文件或拖拽后点「入库」。</div>`;
+    $("series-ask-bar").classList.add("hidden");
     return;
   }
-  box.innerHTML = data.items.map((v) => `
-    <div class="lib-item ${v.video_id === currentId ? "active" : ""}" data-id="${v.video_id}">
-      <div class="t">${esc(v.title || "未命名")}</div>
-      <div class="m">${esc(v.duration_label)} · ${v.chapter_count} 章 · ${v.chunk_count} 块 · ${
-        v.status === "ready" ? "就绪" : v.status === "failed" ? "失败" : v.status}</div>
-    </div>`).join("");
+  const groups = {};
+  for (const v of data.items) {
+    const sid = v.series_id || "_ungrouped";
+    (groups[sid] ||= { label: v.series_label || sid, items: [] }).items.push(v);
+  }
+  const keys = Object.keys(groups).sort((a, b) =>
+    (a === "_ungrouped") - (b === "_ungrouped") || (groups[a].label || "").localeCompare(groups[b].label || "", "zh")
+  );
+  box.innerHTML = keys.map((sid) => {
+    const g = groups[sid];
+    const rows = g.items.map((v) => `
+      <div class="lib-item ${v.video_id === currentId ? "active" : ""}" data-id="${v.video_id}" data-series="${esc(sid)}">
+        <div class="t">${esc(v.title || "未命名")}</div>
+        <div class="m">${esc(v.duration_label)} · ${v.chapter_count} 章 · ${
+          v.status === "ready" ? "就绪" : v.status === "failed" ? "失败" : v.status}</div>
+        <button class="ghost del" data-del="${v.video_id}" title="删除课程">×</button>
+      </div>`).join("");
+    return `<div class="series-head" data-series="${esc(sid)}">${esc(g.label)} · ${g.items.length} 门</div>${rows}`;
+  }).join("");
+
   box.querySelectorAll(".lib-item").forEach((el) => {
-    el.onclick = () => openVideo(el.dataset.id);
+    el.onclick = (ev) => {
+      if (ev.target.closest("[data-del]")) return;
+      openVideo(el.dataset.id);
+    };
   });
+  box.querySelectorAll("[data-del]").forEach((btn) => {
+    btn.onclick = async (ev) => {
+      ev.stopPropagation();
+      const id = btn.dataset.del;
+      if (!confirm(`确定删除课程 ${id}？转写与笔记会一并清除。`)) return;
+      try {
+        await api(`/api/library/${id}`, { method: "DELETE" });
+        if (currentId === id) {
+          currentId = null;
+          current = null;
+          $("video-title").textContent = "未选择课程";
+          $("player").removeAttribute("src");
+          $("player").load();
+        }
+        await loadLibrary();
+      } catch (e) { alert(e.message); }
+    };
+  });
+
+  // 当前课所属系列可跨课问
+  if (currentSeriesId && groups[currentSeriesId] && groups[currentSeriesId].items.length > 1) {
+    $("series-ask-bar").classList.remove("hidden");
+  } else if (currentSeriesId) {
+    $("series-ask-bar").classList.add("hidden");
+  }
 }
 
 async function openVideo(id) {
   currentId = id;
   current = await api(`/api/library/${id}`);
   const v = current.video;
+  currentSeriesId = (await api("/api/library")).items.find((x) => x.video_id === id)?.series_id || null;
   $("video-title").textContent = v.title || "未命名";
   $("video-duration").textContent = v.duration_label;
-  $("player").src = `/media/${id}`;
+
+  const player = $("player");
+  const track = $("subtitle-track");
+  // 先卸旧轨，避免换课时叠多条
+  track.removeAttribute("src");
+  player.src = `/media/${id}`;
+  track.src = `/api/subtitles/${id}.vtt`;
+  player.load();
+
+  // 续播：有进度且未看完（距结尾 > 5s）则跳回
+  const saved = Number(localStorage.getItem(`vedioai.progress.${id}`) || 0);
+  const onMeta = () => {
+    player.removeEventListener("loadedmetadata", onMeta);
+    if (saved > 5 && player.duration && saved < player.duration - 5) {
+      player.currentTime = saved;
+    }
+  };
+  player.addEventListener("loadedmetadata", onMeta);
 
   const list = $("chapters");
   if (!current.chapters.length) {
@@ -678,11 +817,112 @@ async function openVideo(id) {
       el.onclick = () => seek(Number(el.dataset.ms));
     });
   }
+
+  await loadTranscript(id);
+  $("search-panel").innerHTML = `<span class="hint">输入关键词查找本课转写。</span>`;
+  $("search-q").value = "";
+  $("fix-bar").classList.remove("show");
+
   $("chat").innerHTML = "";
   currentSessionId = null;
   await loadSessions(id);
   await loadNotes(id);
-  loadLibrary();
+  await loadLibrary();
+}
+
+async function loadTranscript(videoId) {
+  const box = $("transcript");
+  try {
+    const data = await api(`/api/segments/${videoId}`);
+    transcriptSegs = data.items || [];
+  } catch (e) {
+    transcriptSegs = [];
+    box.innerHTML = `<span class="err">${esc(e.message)}</span>`;
+    return;
+  }
+  if (!transcriptSegs.length) {
+    box.innerHTML = `<span class="hint">尚无转写。</span>`;
+    return;
+  }
+  box.innerHTML = transcriptSegs.map((s) => `
+    <div class="seg-line" data-idx="${s.idx}" data-ms="${s.start_ms}">
+      <span class="ts">${esc(s.label)}</span>
+      <span class="tx">${esc(s.text)}</span>
+    </div>`).join("");
+  box.querySelectorAll(".seg-line").forEach((el) => {
+    el.onclick = () => seek(Number(el.dataset.ms));
+  });
+  box.onmouseup = () => maybeOfferFix();
+}
+
+function setPlayerTab(name) {
+  for (const n of ["chapters", "transcript", "search"]) {
+    $(`tab-${n}`).classList.toggle("on", n === name);
+    $(`panel-${n}`).classList.toggle("hidden", n !== name);
+  }
+}
+
+function highlightTranscript(ms) {
+  if (!transcriptSegs.length) return;
+  let active = null;
+  for (const s of transcriptSegs) {
+    if (s.start_ms <= ms && ms < (s.end_ms || s.start_ms + 1500)) active = s.idx;
+  }
+  $("transcript").querySelectorAll(".seg-line").forEach((el) => {
+    const on = Number(el.dataset.idx) === active;
+    el.classList.toggle("active", on);
+    if (on) el.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  });
+}
+
+function maybeOfferFix() {
+  const sel = window.getSelection();
+  if (!sel || sel.isCollapsed) return;
+  const text = sel.toString().trim();
+  if (!text || text.length > 40 || !currentId) return;
+  // 只在转写面板内选中才弹出
+  const node = sel.anchorNode && sel.anchorNode.parentElement;
+  if (!node || !$("transcript").contains(node)) return;
+  $("fix-wrong").textContent = text;
+  $("fix-right").value = "";
+  $("fix-bar").classList.add("show");
+}
+
+async function applyFix() {
+  const wrong = $("fix-wrong").textContent.trim();
+  const right = $("fix-right").value.trim();
+  if (!wrong || !right || !currentId) return;
+  try {
+    const res = await api("/api/fix", {
+      method: "POST",
+      body: JSON.stringify({ video_id: currentId, wrong, right }),
+    });
+    $("fix-bar").classList.remove("show");
+    await loadTranscript(currentId);
+    const n = Object.values(res.report || {}).reduce((a, b) => a + (typeof b === "number" ? b : 0), 0);
+    alert(`已写入术语表并纠正本课文本（约 ${n} 处替换）。`);
+  } catch (e) {
+    alert(e.message);
+  }
+}
+
+async function runSearch() {
+  const q = $("search-q").value.trim();
+  if (!currentId || !q) return;
+  const data = await api(`/api/search?video_id=${encodeURIComponent(currentId)}&q=${encodeURIComponent(q)}`);
+  const box = $("search-panel");
+  if (!data.items.length) {
+    box.innerHTML = `<span class="hint">没有命中「${esc(q)}」。</span>`;
+    return;
+  }
+  box.innerHTML = data.items.map((s) => `
+    <div class="seg-line" data-ms="${s.start_ms}">
+      <span class="ts">${esc(s.label)}</span>
+      <span class="tx">${esc(s.text)}</span>
+    </div>`).join("");
+  box.querySelectorAll(".seg-line").forEach((el) => {
+    el.onclick = () => { setPlayerTab("transcript"); seek(Number(el.dataset.ms)); };
+  });
 }
 
 /* ---------------------------------------------------------------- 入库 */
@@ -698,6 +938,25 @@ async function startIngest() {
       body: JSON.stringify({ path }),
     });
     $("ingest-progress").classList.remove("hidden");
+    pollJob(job.job_id, "ingest");
+  } catch (e) {
+    $("ingest-error").textContent = e.message;
+    $("btn-ingest").disabled = false;
+  }
+}
+
+async function startIngestUpload(file) {
+  if (!file) return;
+  $("ingest-error").textContent = "";
+  $("btn-ingest").disabled = true;
+  $("ingest-progress").classList.remove("hidden");
+  $("ingest-status").textContent = `上传 ${file.name}…`;
+  try {
+    const fd = new FormData();
+    fd.append("file", file, file.name);
+    const resp = await fetch("/api/ingest/upload", { method: "POST", body: fd });
+    const job = await resp.json();
+    if (!resp.ok) throw new Error(job.detail || `HTTP ${resp.status}`);
     pollJob(job.job_id, "ingest");
   } catch (e) {
     $("ingest-error").textContent = e.message;
@@ -900,7 +1159,6 @@ async function ask() {
   const q = $("question").value.trim();
   if (!q) return;
   if (!currentId) { alert("请先选择一门课程"); return; }
-  // 没有会话时先建一个（旧服务降级路径下 session 可能仍为空，那时走单轮）
   if (!currentSessionId) {
     try {
       const created = await api("/api/sessions", {
@@ -909,13 +1167,11 @@ async function ask() {
       });
       currentSessionId = created.session_id;
       await loadSessions(currentId, currentSessionId);
-      // loadSessions 会清空 chat，把刚要问的话重新塞回去
       $("chat").innerHTML = "";
     } catch (_) { /* 旧服务：继续单轮 */ }
   }
 
   $("question").value = "";
-  // 清掉「新对话」占位提示
   const placeholder = $("chat").querySelector(".hint");
   if (placeholder && !$("chat").querySelector(".msg")) placeholder.remove();
 
@@ -923,38 +1179,124 @@ async function ask() {
 
   const btn = $("btn-ask");
   btn.disabled = true;
-  const pending = pushMsg("ai", "助手", '<span class="hint">思考中…</span>');
+  const pending = pushMsg("ai", "助手", '<span class="hint">…</span>');
+  const bodyEl = pending.querySelector(".body");
+  let acc = "";
+
+  const body = { video_id: currentId, question: q };
+  if (currentSessionId) body.session_id = currentSessionId;
+  if ($("use-position").checked && $("player").src) {
+    body.current_ms = Math.floor($("player").currentTime * 1000);
+  }
 
   try {
-    const body = { video_id: currentId, question: q };
-    if (currentSessionId) body.session_id = currentSessionId;
-    if ($("use-position").checked && $("player").src) {
-      body.current_ms = Math.floor($("player").currentTime * 1000);
-    }
-    const ans = await api("/api/ask", { method: "POST", body: JSON.stringify(body) });
-    if (ans.session_id) currentSessionId = ans.session_id;
-
-    pending.remove();
-    renderAssistantMessage(ans.text, {
-      intent: ans.intent,
-      citations: ans.citations,
-      usage: ans.usage,
-      prefix_tokens: ans.prefix_tokens,
+    const resp = await fetch("/api/ask/stream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
     });
-    if (ans.usage && ans.usage.cache_hit_rate === 0) {
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.detail || `HTTP ${resp.status}`);
+    }
+    const reader = resp.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    let finalAns = null;
+    let eventName = "message";
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      const parts = buf.split("\n\n");
+      buf = parts.pop() || "";
+      for (const block of parts) {
+        let dataLine = "";
+        eventName = "message";
+        for (const line of block.split("\n")) {
+          if (line.startsWith("event:")) eventName = line.slice(6).trim();
+          if (line.startsWith("data:")) dataLine += line.slice(5).trim();
+        }
+        if (!dataLine) continue;
+        let data;
+        try { data = JSON.parse(dataLine); } catch { continue; }
+        if (eventName === "delta" && data.text) {
+          acc += data.text;
+          bodyEl.innerHTML = md(acc);
+          pending.scrollIntoView({ behavior: "smooth", block: "end" });
+        } else if (eventName === "done") {
+          finalAns = data;
+        } else if (eventName === "error") {
+          throw new Error(data.message || "流式问答失败");
+        }
+      }
+    }
+
+    if (!finalAns) {
+      // 降级：非流式
+      const ans = await api("/api/ask", { method: "POST", body: JSON.stringify(body) });
+      finalAns = ans;
+      acc = ans.text || "";
+    }
+
+    if (finalAns.session_id) currentSessionId = finalAns.session_id;
+    pending.remove();
+    renderAssistantMessage(finalAns.text || acc, {
+      intent: finalAns.intent,
+      citations: finalAns.citations,
+      usage: finalAns.usage,
+      prefix_tokens: finalAns.prefix_tokens,
+    });
+    if (finalAns.usage && finalAns.usage.cache_hit_rate === 0) {
       const last = $("chat").lastElementChild;
       last?.insertAdjacentHTML("beforeend",
         `<div class="meta-line">提示：本次未命中上下文缓存。整稿前缀必须保持稳定，否则成本会上升一个数量级。</div>`);
     }
-    // 首问之后标题会变，刷新一下下拉框（不重载消息，避免闪）
     try {
       const data = await api(`/api/sessions?video_id=${encodeURIComponent(currentId)}`);
       renderSessionSelect(data.items || [], currentSessionId);
     } catch (_) {}
   } catch (e) {
-    pending.querySelector(".body").innerHTML = `<span class="err">${esc(e.message)}</span>`;
+    // 流式失败再试一次非流式
+    try {
+      const ans = await api("/api/ask", { method: "POST", body: JSON.stringify(body) });
+      if (ans.session_id) currentSessionId = ans.session_id;
+      pending.remove();
+      renderAssistantMessage(ans.text, {
+        intent: ans.intent,
+        citations: ans.citations,
+        usage: ans.usage,
+        prefix_tokens: ans.prefix_tokens,
+      });
+    } catch (e2) {
+      pending.querySelector(".body").innerHTML = `<span class="err">${esc(e2.message || e.message)}</span>`;
+    }
   } finally {
     btn.disabled = false;
+  }
+}
+
+async function askSeries() {
+  const q = $("series-q").value.trim();
+  if (!q || !currentSeriesId) return;
+  $("series-q").value = "";
+  showTab("ask");
+  pushMsg("user", "我（跨课）", esc(q));
+  const pending = pushMsg("ai", "助手", '<span class="hint">检索系列中…</span>');
+  try {
+    const ans = await api("/api/ask-series", {
+      method: "POST",
+      body: JSON.stringify({ series_id: currentSeriesId, question: q }),
+    });
+    pending.remove();
+    renderAssistantMessage(ans.text, {
+      intent: ans.intent,
+      citations: ans.citations,
+      usage: ans.usage,
+    });
+  } catch (e) {
+    pending.querySelector(".body").innerHTML = `<span class="err">${esc(e.message)}</span>`;
   }
 }
 
@@ -1217,6 +1559,34 @@ $("btn-session-rename").onclick = renameSession;
 $("btn-session-archive").onclick = archiveSession;
 $("session-select").onchange = () => openSession($("session-select").value);
 $("reader-close").onclick = closeReader;
+$("btn-search").onclick = runSearch;
+$("btn-fix-apply").onclick = applyFix;
+$("btn-fix-cancel").onclick = () => $("fix-bar").classList.remove("show");
+$("btn-series-ask").onclick = askSeries;
+$("tab-chapters").onclick = () => setPlayerTab("chapters");
+$("tab-transcript").onclick = () => setPlayerTab("transcript");
+$("tab-search").onclick = () => setPlayerTab("search");
+$("ingest-file").onchange = () => {
+  const f = $("ingest-file").files?.[0];
+  if (f) startIngestUpload(f);
+};
+(() => {
+  const dz = $("dropzone");
+  const prevent = (e) => { e.preventDefault(); e.stopPropagation(); };
+  ["dragenter", "dragover", "dragleave", "drop"].forEach((ev) =>
+    dz.addEventListener(ev, prevent)
+  );
+  dz.addEventListener("dragover", () => dz.classList.add("drag"));
+  dz.addEventListener("dragleave", () => dz.classList.remove("drag"));
+  dz.addEventListener("drop", (e) => {
+    dz.classList.remove("drag");
+    const f = e.dataTransfer?.files?.[0];
+    if (f) startIngestUpload(f);
+  });
+  dz.onclick = () => $("ingest-file").click();
+})();
+$("search-q").addEventListener("keydown", (e) => { if (e.key === "Enter") runSearch(); });
+$("series-q").addEventListener("keydown", (e) => { if (e.key === "Enter") askSeries(); });
 $("reader-regen").onclick = () => {
   closeReader();
   $("tab-notes").onclick();
@@ -1273,9 +1643,14 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && !$("reader").classList.contains("hidden")) closeReader();
 });
 
-// 播放时间显示
+// 播放时间显示 + 转写高亮 + 进度记忆
 $("player").addEventListener("timeupdate", () => {
-  $("player-clock").textContent = fmt($("player").currentTime * 1000);
+  const ms = $("player").currentTime * 1000;
+  $("player-clock").textContent = fmt(ms);
+  highlightTranscript(ms);
+  if (currentId) {
+    localStorage.setItem(`vedioai.progress.${currentId}`, String($("player").currentTime));
+  }
 });
 
 /* ---------------------------------------------------------------- 列宽拖拽 */

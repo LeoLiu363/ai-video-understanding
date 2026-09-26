@@ -15,22 +15,31 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
 from pydantic import BaseModel
+import shutil
 
 from .ask import AskService
 from .config import Config
 from .context import summary_without_outline
 from .embedding import Embedder, Reranker, build_embedder
 from . import ledger
+from .glossary import append_course_correction
 from .ingest.asr_volc import VolcASRClient
 from .jobs import JobRegistry
 from .llm.client import LLMClient, from_llm_config
 from .notes import NotesService
-from .pipeline import IngestPipeline, video_id_for
+from .pipeline import IngestPipeline, repair_videos, video_id_for
 from .schema import ms_to_hms
+from .series import (
+    annotate_library_items,
+    build_series_prefix,
+    list_series,
+    search_across,
+)
 from .store import Store
+from .subtitles import segments_to_webvtt
 
 log = logging.getLogger(__name__)
 
@@ -51,6 +60,19 @@ class AskRequest(BaseModel):
     top_k: int | None = None
     # 可选：带上会话 ID 就进多轮 + 落库；不带则仍是单轮（CLI / 评估兼容）
     session_id: str | None = None
+
+
+class SeriesAskRequest(BaseModel):
+    series_id: str
+    question: str
+    video_ids: list[str] | None = None
+
+
+class FixRequest(BaseModel):
+    video_id: str
+    wrong: str
+    right: str
+    reason: str = "界面标记"
 
 
 class SessionCreateRequest(BaseModel):
@@ -121,6 +143,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
                     "duration_label": ms_to_hms(v["duration_ms"]),
                 }
             )
+        items = annotate_library_items(items)
         return {"items": items}
 
     @app.get("/api/library/{video_id}")
@@ -170,30 +193,26 @@ def create_app(cfg: Config | None = None) -> FastAPI:
 
     # ------------------------------------------------------------------ 入库
 
-    @app.post("/api/ingest")
-    def ingest(req: IngestRequest) -> dict:
-        path = Path(req.path)
+    def _start_ingest_job(path: Path, *, skip_summary: bool = False, no_slides: bool = False) -> dict:
         if not path.exists():
             raise HTTPException(400, f"文件不存在：{path}")
-
         video_id = video_id_for(path)
         running = jobs.find_running("ingest", video_id)
         if running:
             return {"job_id": running.job_id, "video_id": video_id, "reused": True}
 
-        if req.no_slides:
+        if no_slides:
             cfg.slides.enabled = False
 
         def work(on_progress) -> dict:
             asr = VolcASRClient(cfg.asr)
-            llm = None if req.skip_summary else make_llm()
+            llm = None if skip_summary else make_llm()
             pipeline = IngestPipeline(cfg, store, llm=llm, embedder=embedder, asr=asr)
             try:
                 video = pipeline.run(
-                    path, skip_summary=req.skip_summary, progress=on_progress
+                    path, skip_summary=skip_summary, progress=on_progress
                 )
                 if llm is not None:
-                    # 入完立刻预热前缀，让第一次提问就命中上下文缓存
                     AskService(
                         cfg, store, llm, make_vision(),
                         embedder=embedder, reranker=reranker,
@@ -204,6 +223,31 @@ def create_app(cfg: Config | None = None) -> FastAPI:
 
         job = jobs.submit("ingest", video_id, work)
         return {"job_id": job.job_id, "video_id": video_id}
+
+    @app.post("/api/ingest")
+    def ingest(req: IngestRequest) -> dict:
+        return _start_ingest_job(
+            Path(req.path), skip_summary=req.skip_summary, no_slides=req.no_slides
+        )
+
+    @app.post("/api/ingest/upload")
+    async def ingest_upload(file: UploadFile = File(...)) -> dict:
+        """浏览器选文件/拖拽：先落到 data/inbox/，再走同一条入库任务。"""
+        name = Path(file.filename or "upload.bin").name
+        if not name or name in (".", ".."):
+            raise HTTPException(400, "文件名无效")
+        inbox = cfg.data_dir / "inbox"
+        inbox.mkdir(parents=True, exist_ok=True)
+        dest = inbox / name
+        # 同名文件加短后缀，避免覆盖
+        if dest.exists():
+            dest = inbox / f"{dest.stem}-{datetime.now().strftime('%H%M%S')}{dest.suffix}"
+        try:
+            with dest.open("wb") as out:
+                shutil.copyfileobj(file.file, out)
+        finally:
+            await file.close()
+        return _start_ingest_job(dest)
 
     @app.get("/api/jobs/{job_id}")
     def job_status(job_id: str) -> dict:
@@ -238,6 +282,180 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             return answer.to_dict()
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
+        finally:
+            llm.close()
+
+    @app.post("/api/ask/stream")
+    def ask_stream(req: AskRequest):
+        """SSE 流式问答。事件：meta / delta / done / error。"""
+        if not cfg.llm.api_key:
+            raise HTTPException(400, "未配置 DEEPSEEK_API_KEY")
+
+        import json as _json
+
+        def event_stream():
+            llm = make_llm()
+            try:
+                service = AskService(
+                    cfg, store, llm, make_vision(),
+                    embedder=embedder, reranker=reranker,
+                )
+                for kind, payload in service.ask_stream(
+                    req.video_id,
+                    req.question,
+                    current_ms=req.current_ms,
+                    top_k=req.top_k,
+                    session_id=req.session_id,
+                ):
+                    if kind == "meta":
+                        data = payload
+                    elif kind == "delta":
+                        data = {"text": payload}
+                    elif kind == "done":
+                        data = payload.to_dict()
+                    else:
+                        data = {"raw": str(payload)}
+                    yield f"event: {kind}\ndata: {_json.dumps(data, ensure_ascii=False)}\n\n"
+            except Exception as exc:  # noqa: BLE001
+                yield (
+                    "event: error\ndata: "
+                    + _json.dumps({"message": str(exc)}, ensure_ascii=False)
+                    + "\n\n"
+                )
+            finally:
+                llm.close()
+
+        return StreamingResponse(
+            event_stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    @app.get("/api/subtitles/{video_id}.vtt")
+    def subtitles_vtt(video_id: str) -> Response:
+        if store.get_video(video_id) is None:
+            raise HTTPException(404, "课程不存在")
+        vtt = segments_to_webvtt(store.get_segments(video_id))
+        return Response(
+            content=vtt,
+            media_type="text/vtt; charset=utf-8",
+            headers={"Cache-Control": "no-cache"},
+        )
+
+    @app.get("/api/segments/{video_id}")
+    def list_segments(video_id: str) -> dict:
+        if store.get_video(video_id) is None:
+            raise HTTPException(404, "课程不存在")
+        items = [
+            {
+                "idx": s.idx,
+                "start_ms": s.start_ms,
+                "end_ms": s.end_ms,
+                "text": s.text,
+                "label": ms_to_hms(s.start_ms),
+            }
+            for s in store.get_segments(video_id)
+        ]
+        return {"items": items}
+
+    @app.get("/api/search")
+    def search(video_id: str, q: str, top_k: int = 20) -> dict:
+        if store.get_video(video_id) is None:
+            raise HTTPException(404, "课程不存在")
+        q = (q or "").strip()
+        if not q:
+            return {"items": []}
+        items = store.search_segments(video_id, q, top_k=top_k)
+        for it in items:
+            it["label"] = ms_to_hms(it["start_ms"])
+        return {"items": items, "q": q}
+
+    @app.post("/api/fix")
+    def fix_term(req: FixRequest) -> dict:
+        """界面标记错词：写入自动术语表并对本课执行 repair（含重嵌入）。"""
+        try:
+            auto_path = append_course_correction(
+                cfg.glossary_path,
+                req.video_id,
+                req.wrong,
+                req.right,
+                reason=req.reason or "界面标记",
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+        report = repair_videos(
+            cfg, store, [req.video_id], embedder=embedder, dry_run=False
+        )
+        return {
+            "ok": True,
+            "glossary": str(auto_path),
+            "report": report.get(req.video_id) or {},
+        }
+
+    @app.get("/api/series")
+    def series_list() -> dict:
+        return {"items": list_series(store)}
+
+    @app.post("/api/ask-series")
+    def ask_series(req: SeriesAskRequest) -> dict:
+        """系列内跨课问答：各课摘要前缀 + 跨课检索证据。"""
+        if not cfg.llm.api_key:
+            raise HTTPException(400, "未配置 DEEPSEEK_API_KEY")
+        groups = {g["series_id"]: g for g in list_series(store)}
+        group = groups.get(req.series_id)
+        if group is None:
+            raise HTTPException(404, "系列不存在")
+        video_ids = req.video_ids or [v["video_id"] for v in group["videos"]]
+        video_ids = [vid for vid in video_ids if store.get_video(vid) is not None]
+        if not video_ids:
+            raise HTTPException(400, "系列内没有可用课程")
+
+        prefix = build_series_prefix(store, video_ids)
+        hits = search_across(store, video_ids, req.question)
+        evidence_lines = []
+        for h in hits:
+            evidence_lines.append(
+                f"- 《{h['title']}》[{h['label']}] {h['text']}"
+            )
+        evidence = "\n".join(evidence_lines) if evidence_lines else "（本系列关键词检索暂无命中）"
+        question_text = (
+            f"问题：{req.question}\n\n"
+            f"【跨课检索证据】\n{evidence}\n\n"
+            "请综合各课摘要与证据回答；引用时写清课名与时间，格式如《课名》[MM:SS]。"
+        )
+
+        from .llm import prompts as _prompts
+
+        llm = make_llm()
+        try:
+            with ledger.usage_scope("ask", video_ids[0]):
+                full_prompt = f"{_prompts.QA_GLOBAL}\n\n---\n{prefix}"
+                reply = llm.ask(full_prompt, question_text)
+            citations = [
+                {
+                    "start_ms": h["start_ms"],
+                    "end_ms": h["end_ms"],
+                    "label": h["label"],
+                    "text": h["text"],
+                    "video_id": h["video_id"],
+                    "title": h["title"],
+                }
+                for h in hits[:8]
+            ]
+            return {
+                "text": reply.text,
+                "intent": "series",
+                "citations": citations,
+                "usage": {
+                    "prompt_tokens": reply.usage.prompt_tokens,
+                    "completion_tokens": reply.usage.completion_tokens,
+                    "cached_tokens": reply.usage.cached_tokens,
+                    "cache_hit_rate": round(reply.usage.cache_hit_rate, 3),
+                },
+                "series_id": req.series_id,
+                "video_ids": video_ids,
+            }
         finally:
             llm.close()
 

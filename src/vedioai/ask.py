@@ -227,6 +227,128 @@ class AskService:
 
         return answer
 
+    def ask_stream(
+        self,
+        video_id: str,
+        question: str,
+        *,
+        current_ms: int | None = None,
+        within_chapter: Chapter | None = None,
+        top_k: int | None = None,
+        session_id: str | None = None,
+        persist: bool = True,
+    ):
+        """流式问答。产量：
+
+        - ``("meta", dict)``：intent / session 等元信息（先发）
+        - ``("delta", str)``：正文增量
+        - ``("done", Answer)``：完整 Answer（含 citations / usage），最后一项
+
+        视觉题仍走非流式（图文接口流式不稳定），一次性产出全文再 ``done``。
+        消息前缀结构与 ``ask`` 完全一致。
+        """
+        video = self.store.get_video(video_id)
+        if video is None:
+            raise ValueError(f"未找到课程 {video_id}")
+
+        chapters = self.store.get_chapters(video_id)
+        chunks = self.store.get_chunks(video_id)
+        if not chunks:
+            raise ValueError("该课程尚未完成入库（没有转写内容）")
+
+        session = None
+        history: list[dict] = []
+        if session_id:
+            session = self.store.get_session(session_id)
+            if session is None:
+                raise ValueError(f"会话不存在：{session_id}")
+            if session["video_id"] != video_id:
+                raise ValueError("会话不属于该课程")
+            history = self.store.get_messages(session_id, limit=HISTORY_MESSAGE_LIMIT)
+
+        intent = self._classify(question)
+        prefix, prefix_tokens, used_outline = self._get_prefix(video_id, video, chapters, chunks)
+        prompt = prompts.QA_GLOBAL if intent == "global" else prompts.QA_LOCAL
+        full_prompt = f"{prompt}\n\n---\n{prefix}"
+        hits = self.retriever.search(
+            video_id, question, top_k=top_k, time_bias_ms=current_ms, within_chapter=within_chapter
+        )
+
+        yield (
+            "meta",
+            {
+                "intent": intent,
+                "session_id": session_id or "",
+                "prefix_tokens": prefix_tokens,
+                "used_outline": used_outline,
+            },
+        )
+
+        images: list[str] = []
+        reply = None
+
+        with ledger.usage_scope("ask", video_id):
+            if intent == "visual" and self.vision is not None:
+                image_paths = self._evidence_images(video_id, hits)
+                if image_paths:
+                    question_text = self._build_question(
+                        question, current_ms, within_chapter, None, history=history
+                    )
+                    reply = self.vision.ask_with_images(full_prompt, question_text, image_paths)
+                    images = [str(p) for p in image_paths]
+                    if reply.text:
+                        yield ("delta", reply.text)
+
+            if reply is None:
+                question_text = self._build_question(
+                    question, current_ms, within_chapter, hits, history=history
+                )
+                for kind, payload in self.client.ask_stream(full_prompt, question_text):
+                    if kind == "delta":
+                        yield ("delta", payload)
+                    elif kind == "done":
+                        reply = payload
+
+        if reply is None:
+            raise RuntimeError("流式问答未收到完成事件")
+
+        citations = self._build_citations(video_id, chapters, chunks, hits, reply.text)
+        answer = Answer(
+            text=reply.text,
+            citations=citations,
+            intent=intent,
+            usage=reply.usage,
+            prefix_tokens=prefix_tokens,
+            used_outline=used_outline,
+            images=images,
+            session_id=session_id or "",
+            history_turns=sum(1 for m in history if m["role"] == "user"),
+        )
+
+        if session is not None and persist:
+            self.store.add_message(session_id, "user", question)
+            self.store.add_message(
+                session_id,
+                "assistant",
+                reply.text,
+                meta={
+                    "intent": intent,
+                    "citations": [c.to_dict() for c in citations],
+                    "usage": {
+                        "prompt_tokens": reply.usage.prompt_tokens,
+                        "completion_tokens": reply.usage.completion_tokens,
+                        "cached_tokens": reply.usage.cached_tokens,
+                        "cache_hit_rate": round(reply.usage.cache_hit_rate, 3),
+                    },
+                    "prefix_tokens": prefix_tokens,
+                    "images": images,
+                },
+            )
+            if not (session.get("title") or "").strip():
+                self.store.update_session(session_id, title=_auto_title(question))
+
+        yield ("done", answer)
+
     def warm(self, video_id: str) -> int:
         """预生成前缀，让第一次提问就命中缓存。"""
         video = self.store.get_video(video_id)

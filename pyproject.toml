@@ -16,6 +16,7 @@ dependencies = [
     "jieba>=0.42.1",
     "numpy>=1.26",
     "Pillow>=10.4",
+    "python-multipart>=0.0.9",
 ]
 
 [project.optional-dependencies]

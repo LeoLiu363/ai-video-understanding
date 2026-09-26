@@ -597,6 +597,73 @@ def _auto_path(path: Path) -> Path:
     return path.with_name(f"{path.stem}.auto{path.suffix}")
 
 
+def append_course_correction(
+    path: Path,
+    video_id: str,
+    wrong: str,
+    right: str,
+    *,
+    reason: str = "界面标记",
+) -> Path:
+    """把一条课内纠错写入自动术语表的 ``courses.<video_id>.corrections``。
+
+    不写入手写 ``vedioai.glossary.yaml``（注释是策展成果，机器不得覆写）。
+    同 wrong 已存在则更新 right/reason。返回实际写入的 auto 路径。
+    """
+    wrong = (wrong or "").strip()
+    right = (right or "").strip()
+    video_id = (video_id or "").strip()
+    if not wrong or not right or not video_id:
+        raise ValueError("wrong / right / video_id 都不能为空")
+    if wrong == right:
+        raise ValueError("纠正前后相同，无需写入")
+
+    auto = _auto_path(path)
+    existing: dict = {"version": 1, "corrections": [], "courses": {}}
+    if auto.exists():
+        loaded = yaml.safe_load(auto.read_text(encoding="utf-8")) or {}
+        if isinstance(loaded, dict):
+            existing.update(loaded)
+
+    courses = existing.setdefault("courses", {})
+    if not isinstance(courses, dict):
+        courses = {}
+        existing["courses"] = courses
+    course = courses.setdefault(video_id, {})
+    if not isinstance(course, dict):
+        course = {}
+        courses[video_id] = course
+    items: list = list(course.get("corrections") or [])
+    updated = False
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        w = item.get("wrong") or []
+        if isinstance(w, str):
+            w = [w]
+        if wrong in [str(x).strip() for x in w]:
+            item["wrong"] = [wrong]
+            item["right"] = right
+            item["reason"] = reason
+            updated = True
+            break
+    if not updated:
+        items.append({"wrong": [wrong], "right": right, "reason": reason})
+    course["corrections"] = items
+
+    # 保留全局 corrections（adjudicate 写入的），只额外挂上 courses
+    payload = {
+        "version": int(existing.get("version") or 1),
+        "corrections": list(existing.get("corrections") or []),
+        "courses": courses,
+    }
+    text = AUTO_GLOSSARY_HEADER + yaml.safe_dump(
+        payload, allow_unicode=True, sort_keys=False, default_flow_style=False
+    )
+    auto.write_text(text, encoding="utf-8", newline="\n")
+    return auto
+
+
 # ------------------------------------------------------------------ 便捷函数
 
 

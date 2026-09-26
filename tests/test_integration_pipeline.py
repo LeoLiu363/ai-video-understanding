@@ -899,3 +899,45 @@ def test_slides_with_ocr_text_flow_into_chunks(cfg: Config, video_file: Path, mo
     assert any(marker in c.ocr_text for c in chunks)
 
 
+def test_http_subtitles_search_series_and_fix(cfg: Config, video_file: Path, tmp_path: Path):
+    """字幕 / 搜索 / 系列 / 纠错接口冒烟（不依赖真实 LLM）。"""
+    from fastapi.testclient import TestClient
+
+    from vedioai.server import create_app
+
+    cfg.glossary_file = tmp_path / "vedioai.glossary.yaml"
+    cfg.glossary_file.write_text("version: 1\ncorrections: []\n", encoding="utf-8")
+
+    store = Store(cfg.db_path)
+    vid = IngestPipeline(cfg, store, llm=None, asr=StubASR()).run(
+        video_file, skip_summary=True
+    ).video_id
+    store.close()
+
+    app = create_app(cfg)
+    with TestClient(app) as client:
+        vtt = client.get(f"/api/subtitles/{vid}.vtt")
+        assert vtt.status_code == 200
+        assert "WEBVTT" in vtt.text
+
+        segs = client.get(f"/api/segments/{vid}").json()
+        assert segs["items"]
+
+        sample = segs["items"][0]["text"][:4] or "排序"
+        found = client.get("/api/search", params={"video_id": vid, "q": sample}).json()
+        assert "items" in found
+
+        lib = client.get("/api/library").json()
+        assert lib["items"][0].get("series_id")
+        series = client.get("/api/series").json()
+        assert series["items"]
+
+        wrong = sample[:2] if len(sample) >= 2 else sample
+        right = wrong + "X"
+        fixed = client.post(
+            "/api/fix",
+            json={"video_id": vid, "wrong": wrong, "right": right},
+        ).json()
+        assert fixed["ok"] is True
+        assert (tmp_path / "vedioai.glossary.auto.yaml").exists()
+

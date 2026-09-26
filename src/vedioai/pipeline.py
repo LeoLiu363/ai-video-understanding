@@ -116,11 +116,12 @@ def repair_videos(
     只做确定性替换，所以对同一份数据反复执行是幂等的（第二次全部计 0）。
     返回 {video_id: {字段: 替换次数}}。
     """
-    glossary = Glossary.load(cfg.glossary_path)
     targets = video_ids if video_ids is not None else [v["video_id"] for v in store.list_videos()]
     report: dict[str, dict[str, int]] = {}
 
     for i, video_id in enumerate(targets):
+        # 每课单独加载：courses.<video_id> 下的界面纠错只对本课生效
+        glossary = Glossary.load(cfg.glossary_path, video_id=video_id)
         stats: dict[str, int] = {}
 
         def tally(field_name: str, fixes) -> int:
@@ -618,7 +619,7 @@ class IngestPipeline:
         path.write_text("\n".join(lines), encoding="utf-8")
 
     def purge(self, video_id: str) -> None:
-        """删除某课程的入库产物（转写、幻灯片、代理、向量）。"""
+        """删除某课程的入库产物（转写、幻灯片、代理、向量、会话）。"""
         work_dir = self.cfg.library_dir / video_id
         if work_dir.exists():
             shutil.rmtree(work_dir, ignore_errors=True)
@@ -626,5 +627,10 @@ class IngestPipeline:
             self.store.conn.execute(f"DELETE FROM {table} WHERE video_id=?", (video_id,))  # noqa: S608
         self.store.conn.execute("DELETE FROM chunks_fts WHERE video_id=?", (video_id,))
         self.store.conn.execute("DELETE FROM segments_fts WHERE video_id=?", (video_id,))
+        # 会话消息靠 FK CASCADE；先删 sessions
+        try:
+            self.store.conn.execute("DELETE FROM chat_sessions WHERE video_id=?", (video_id,))
+        except Exception:  # noqa: BLE001 — 旧库可能还没有会话表
+            pass
         self.store.conn.execute("DELETE FROM videos WHERE video_id=?", (video_id,))
         self.store.conn.commit()
