@@ -164,6 +164,14 @@ CREATE INDEX IF NOT EXISTS idx_slide_video   ON slides(video_id, idx);
 CREATE INDEX IF NOT EXISTS idx_seg_video     ON segments(video_id, idx);
 CREATE INDEX IF NOT EXISTS idx_usage_video   ON usage_log(video_id, at);
 CREATE INDEX IF NOT EXISTS idx_usage_at      ON usage_log(at);
+
+-- 课名快照：删课后 videos 没了，用量账本仍要显示可读课名，而不是裸 video_id。
+CREATE TABLE IF NOT EXISTS course_labels (
+    video_id TEXT PRIMARY KEY,
+    title    TEXT NOT NULL DEFAULT '',
+    deleted  INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE INDEX IF NOT EXISTS idx_session_video ON chat_sessions(video_id, updated_at);
 CREATE INDEX IF NOT EXISTS idx_msg_session   ON chat_messages(session_id, id);
 """
@@ -268,7 +276,32 @@ class Store:
             """,
             video.to_row(),
         )
+        self.remember_course_label(video.video_id, video.title or "", deleted=False)
         self.conn.commit()
+
+    def remember_course_label(
+        self, video_id: str, title: str = "", *, deleted: bool | None = None
+    ) -> None:
+        """写入/更新课名快照。deleted=None 时保留原删除标记。"""
+        video_id = (video_id or "").strip()
+        if not video_id:
+            return
+        title = (title or "").strip()
+        row = self.conn.execute(
+            "SELECT title, deleted FROM course_labels WHERE video_id=?", (video_id,)
+        ).fetchone()
+        if row is None:
+            self.conn.execute(
+                "INSERT INTO course_labels(video_id, title, deleted) VALUES(?,?,?)",
+                (video_id, title, 1 if deleted else 0),
+            )
+            return
+        new_title = title or (row["title"] or "")
+        new_deleted = row["deleted"] if deleted is None else (1 if deleted else 0)
+        self.conn.execute(
+            "UPDATE course_labels SET title=?, deleted=? WHERE video_id=?",
+            (new_title, new_deleted, video_id),
+        )
 
     def set_status(self, video_id: str, status: VideoStatus, error: str | None = None) -> None:
         self.conn.execute(
@@ -868,20 +901,27 @@ class Store:
         # 单课视图下不需要「按课程拆分」（只有一行），所以只在全库视图里算。
         by_video: list[dict] = []
         if not video_id:
-            by_video = [
-                dict(r)
-                for r in self.conn.execute(
-                    """
-                    SELECT u.video_id,
-                           COALESCE(v.title, u.video_id) AS title,
-                           COUNT(*) AS calls,
-                           COALESCE(SUM(u.cost_yuan), 0) AS cost
-                    FROM usage_log u
-                    LEFT JOIN videos v ON v.video_id = u.video_id
-                    GROUP BY u.video_id ORDER BY cost DESC
-                    """
-                ).fetchall()
-            ]
+            by_video = []
+            for r in self.conn.execute(
+                """
+                SELECT u.video_id,
+                       COALESCE(NULLIF(v.title, ''), NULLIF(l.title, ''), '') AS raw_title,
+                       CASE WHEN v.video_id IS NULL THEN 1 ELSE 0 END AS deleted,
+                       COUNT(*) AS calls,
+                       COALESCE(SUM(u.cost_yuan), 0) AS cost
+                FROM usage_log u
+                LEFT JOIN videos v ON v.video_id = u.video_id
+                LEFT JOIN course_labels l ON l.video_id = u.video_id
+                GROUP BY u.video_id
+                ORDER BY cost DESC
+                """
+            ).fetchall():
+                item = dict(r)
+                deleted = bool(item.pop("deleted", 0))
+                raw = (item.pop("raw_title", None) or "").strip()
+                item["deleted"] = deleted
+                item["title"] = _usage_course_title(item["video_id"], raw, deleted=deleted)
+                by_video.append(item)
         by_day = rows(
             f"""
             SELECT date(at, 'localtime') AS day, COUNT(*) AS calls,
@@ -1055,6 +1095,19 @@ def _message_row(row: sqlite3.Row) -> dict:
     except json.JSONDecodeError:
         d["meta"] = {}
     return d
+
+
+def _usage_course_title(video_id: str, raw_title: str, *, deleted: bool) -> str:
+    """用量列表里的课名：删课后不能退化成一串 hex。"""
+    title = (raw_title or "").strip()
+    if title == video_id:
+        title = ""
+    if deleted:
+        if title:
+            return f"已删除 · {title}"
+        short = (video_id or "")[:8]
+        return f"已删除课程（{short}…）" if short else "已删除课程"
+    return title or video_id or "未命名"
 
 
 def _short_title(text: str, limit: int = 28) -> str:

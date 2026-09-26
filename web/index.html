@@ -1511,7 +1511,11 @@ async function loadUsage() {
     ).join("") || '<div class="hint">暂无记录</div>';
 
   $("usage-video").innerHTML =
-    (u.by_video || []).map((v) => usageRow(v.title || v.video_id, `${yuan(v.cost)} · ${v.calls} 次`)).join("")
+    (u.by_video || []).map((v) => usageRow(
+      v.title || v.video_id,
+      `${yuan(v.cost)} · ${v.calls} 次`,
+      !!v.deleted
+    )).join("")
     || '<div class="hint">暂无记录</div>';
 
   const flash = (u.prices || {})["deepseek-flash"] || {};

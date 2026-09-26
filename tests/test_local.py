@@ -1674,6 +1674,28 @@ def test_store_usage_summary_separates_priced_from_unpriced(store: Store, sample
     assert s["by_video"] == []
     full = store.usage_summary()
     assert [v["video_id"] for v in full["by_video"]] == ["v1"]
+    assert full["by_video"][0]["title"] == sample_video.title
+    assert full["by_video"][0]["deleted"] is False
+
+
+def test_usage_keeps_readable_title_after_course_deleted(store: Store, sample_video: Video, tmp_path: Path):
+    """删课保留用量，但课名不能退化成裸 video_id。"""
+    from vedioai.config import Config
+    from vedioai.pipeline import IngestPipeline
+
+    store.record_usage(kind="ask", model="m", video_id="v1", cost_yuan=0.12)
+    cfg = Config()
+    cfg.data_dir = tmp_path / "data"
+    cfg.data_dir.mkdir(parents=True)
+    IngestPipeline(cfg, store).purge("v1")
+
+    full = store.usage_summary()
+    row = full["by_video"][0]
+    assert row["video_id"] == "v1"
+    assert row["deleted"] is True
+    assert "已删除" in row["title"]
+    assert sample_video.title in row["title"]
+    assert row["title"] != "v1"
 
 
 def test_store_record_usage_never_raises_on_failure(store: Store):

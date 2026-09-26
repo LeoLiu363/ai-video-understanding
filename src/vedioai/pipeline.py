@@ -619,7 +619,15 @@ class IngestPipeline:
         path.write_text("\n".join(lines), encoding="utf-8")
 
     def purge(self, video_id: str) -> None:
-        """删除某课程的入库产物（转写、幻灯片、代理、向量、会话）。"""
+        """删除某课程的入库产物（转写、幻灯片、代理、向量、会话）。
+
+        用量账本保留（钱已经花了），但会先把课名写入 course_labels，
+        避免界面「按课程」里只剩一串 video_id。
+        """
+        video = self.store.get_video(video_id)
+        title = (video.title if video else "") or ""
+        self.store.remember_course_label(video_id, title, deleted=True)
+
         work_dir = self.cfg.library_dir / video_id
         if work_dir.exists():
             shutil.rmtree(work_dir, ignore_errors=True)
