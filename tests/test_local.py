@@ -19,7 +19,12 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT))
 
-from evals.run_eval import normalize, score_citation, score_keypoints  # noqa: E402
+from evals.run_eval import (  # noqa: E402
+    normalize,
+    score_citation,
+    score_keypoints,
+    strip_extension_blocks,
+)
 from vedioai.context import build_full_prefix, build_outline_prefix, estimate_tokens  # noqa: E402
 from vedioai.ingest.media import MediaInfo, StreamInfo, pick_split_points, plan_proxy  # noqa: E402
 from vedioai.ingest.segment import attach_parents, build_chapters, build_chunks  # noqa: E402
@@ -555,6 +560,22 @@ def test_score_keypoints_supports_alias_arrays():
 def test_score_keypoints_ignores_punctuation_and_case():
     result = score_keypoints("用 Java 的 Arrays.sort 即可", ["arrays.sort"])
     assert result.hit == 1
+
+
+def test_score_keypoints_ignores_extension_blockquote():
+    """课外「拓展」段落不应干扰课内要点命中判定。"""
+    answer = (
+        "课内讲的是 adbd 提权。[时间 04:14]\n\n"
+        "> **拓展**\n"
+        "> 课外常有人把 chmod 777 也当成提权手段，这里不计入课内要点。\n"
+    )
+    stripped = strip_extension_blocks(answer)
+    assert "拓展" not in stripped
+    assert "chmod" not in stripped
+    # 若未剥离，误命中「chmod」会让评分虚高；剥离后不应命中
+    result = score_keypoints(answer, ["adbd", "chmod"])
+    assert result.hit == 1
+    assert result.missing == ["chmod"]
 
 
 def test_normalize():
@@ -1903,4 +1924,43 @@ def test_qa_prompts_allow_labeled_extension_but_keep_grounding():
     assert "不要补充外部知识" in prompts.CHUNK_SUMMARY
     assert "拓展" not in prompts.SYSTEM_TUTOR
     assert "拓展" in prompts.SYSTEM_QA
+
+
+def test_segments_to_webvtt_and_search(store: Store, sample_video: Video):
+    from vedioai.schema import Segment
+    from vedioai.subtitles import segments_to_webvtt
+
+    segs = [
+        Segment(idx=0, start_ms=0, end_ms=1500, text="快速排序的平均复杂度"),
+        Segment(idx=1, start_ms=2000, end_ms=3500, text="归并排序需要额外空间"),
+    ]
+    store.replace_segments("v1", segs)
+    vtt = segments_to_webvtt(segs)
+    assert vtt.startswith("WEBVTT")
+    assert "00:00:00.000 --> 00:00:01.500" in vtt
+    assert "快速排序" in vtt
+
+    hits = store.search_segments("v1", "归并排序", top_k=5)
+    assert hits and hits[0]["idx"] == 1
+    assert "归并" in hits[0]["text"]
+
+
+def test_append_course_correction_writes_auto_glossary(tmp_path: Path):
+    from vedioai.glossary import Glossary, append_course_correction
+
+    main = tmp_path / "vedioai.glossary.yaml"
+    main.write_text("version: 1\ncorrections: []\n", encoding="utf-8")
+    auto = append_course_correction(main, "vid1", "肉的", "Root", reason="界面")
+    assert auto.name.endswith(".auto.yaml")
+    gl = Glossary.load(main, video_id="vid1")
+    fixed, fixes = gl.correct("肉的权限")
+    assert fixed == "Root权限"
+    assert fixes and fixes[0].right == "Root"
+
+
+def test_series_groups_by_parent_dir():
+    from vedioai.series import series_id_for, series_label
+
+    assert series_id_for(r"D:\courses\Android\a.mp4") == "Android"
+    assert series_label("_ungrouped") == "未分组"
 

@@ -1,0 +1,182 @@
+# ============================================================================
+# 评估集 · Root 原理、检测方法与反制手段
+#
+# video_id: 0665b84d44c3131e（约 45 分钟，口播 + Notepad 笔记 + Android Studio 演示）
+# 出题依据：真实转写 + 课件 OCR，非凭空编写。
+# 评分标准见 evals/SCORING.md
+#
+# 覆盖：factual 6 / cross 5 / visual 4 / global 5 = 20 题
+# 目的：避免评估只覆盖「关键代码定位」一门课；并在「拓展」提示词下做回归。
+# ============================================================================
+
+version: 1
+
+course:
+  video_id: "0665b84d44c3131e"
+  title: "Root原理、检测方法与反制手段"
+  notes: "口播为主，辅以 Notepad++ 笔记与 Android Studio / QtScrcpy 演示"
+
+notes_expected: []
+# 笔记评估可另跑；本文件优先做「拓展提示词」下的问答回归（约 20 题）。
+# 若要评笔记，可参考第一门课 questions.yaml 的 notes_expected 写法补全后重跑。
+
+questions:
+  # ------------------------------------------------------------------ 事实型
+  - id: r-f01
+    type: factual
+    question: "老师说 Root 这个词是从哪个系统传过来的？在该系统里它指什么？"
+    expect_keypoints:
+      - ["Linux", "linux"]
+      - ["最高权限", "最高"]
+    expect_time: "01:57"
+
+  - id: r-f02
+    type: factual
+    question: "利用 Linux 漏洞做提权时，老师举例的是哪一种提权？"
+    expect_keypoints:
+      - ["adbd", "ADB", "adb"]
+    expect_time: "04:14"
+
+  - id: r-f03
+    type: factual
+    question: "获取 Root 时，su 文件一般放到哪两个系统目录？"
+    expect_keypoints:
+      - ["/system/bin", "system/bin"]
+      - ["/system/xbin", "system/xbin"]
+    expect_time: "04:49"
+
+  - id: r-f04
+    type: factual
+    question: "全 Root 和半 Root 的区分标准是什么？"
+    expect_keypoints:
+      - ["系统文件", "修改系统"]
+      - ["半Root", "半 root", "半root", "全Root", "全 root"]
+    expect_time: "07:37"
+
+  - id: r-f05
+    type: factual
+    question: "checkBusybox 方法里执行的是哪条命令来判断是否安装了 Busybox？"
+    expect_keypoints:
+      - ["busybox", "Busybox", "BusyBox"]
+      - ["df"]
+    expect_time: "18:24"
+
+  - id: r-f06
+    type: factual
+    question: "通过 Build.TAGS 检测时，测试版对应的值是什么？"
+    expect_keypoints:
+      - ["test-keys", "test keys", "testkeys"]
+    expect_time: "20:04"
+
+  # ------------------------------------------------------------------ 跨段
+  - id: r-c01
+    type: cross
+    question: "老师讲的获取 Root 提权步骤，按顺序大致包括哪几步？"
+    expect_keypoints:
+      - ["提权", "adbd", "ADB"]
+      - ["su"]
+      - ["/system/bin", "system/bin", "/system/xbin", "system/xbin"]
+
+  - id: r-c02
+    type: cross
+    question: "RootUtils.isDeviceRooted 会依次调用哪些检查方法？至少说出三个方法名。"
+    expect_keypoints:
+      - ["checkDeviceDebuggable", "Debuggable", "test-keys"]
+      - ["checkBusybox", "Busybox", "busybox"]
+      - ["checkGetRootAuth", "getRootAuth", "su"]
+    expect_time: "38:58"
+
+  - id: r-c03
+    type: cross
+    question: "隐藏 su、绕过「读文件」类 Root 检测时，老师提到了哪两种思路？"
+    expect_keypoints:
+      - ["改", "文件名", "改名"]
+      - ["隐藏", "return"]
+    expect_time: "24:46"
+
+  - id: r-c04
+    type: cross
+    question: "Hook openat 时，访问 /system/bin/su 或 /system/xbin/su 会被替换成什么路径？"
+    expect_keypoints:
+      - ["Mysu", "MySu", "mysu"]
+      - ["openat"]
+    expect_time: "28:17"
+
+  - id: r-c05
+    type: cross
+    question: "为什么只 Hook 主线程时，执行 su 的 Root 检测仍然可能 Hook 不到？"
+    expect_keypoints:
+      - ["新开线程", "新线程", "线程"]
+      - ["主线程", "Hook"]
+    expect_time: "29:36"
+
+  # ------------------------------------------------------------------ 视觉
+  - id: r-v01
+    type: visual
+    question: "课件笔记里写的获取 Root 三步是什么？（看笔记/PPT，不要只靠口播猜测）"
+    expect_keypoints:
+      - ["提权", "adbd"]
+      - ["su"]
+      - ["/system/bin", "system/bin", "/system/xbin", "system/xbin"]
+    expect_time: "01:40"
+
+  - id: r-v02
+    type: visual
+    question: "笔记里「全 Root－半 Root」后面括号写的解锁对象是什么？"
+    expect_keypoints:
+      - ["systemlock", "system lock", "cslock"]
+    expect_time: "07:46"
+
+  - id: r-v03
+    type: visual
+    question: "Android Studio 里 RootUtils 的 checkBusybox 相关界面/代码在演示什么检测方法？"
+    expect_keypoints:
+      - ["busybox", "Busybox", "BusyBox"]
+      - ["df", "checkBusybox"]
+    expect_time: "18:14"
+
+  - id: r-v04
+    type: visual
+    question: "课件代码里 Hook openat / execve 时，把 su 路径替换成的目标名是什么？"
+    expect_keypoints:
+      - ["Mysu", "MySu", "mysu"]
+    expect_time: "33:22"
+
+  # ------------------------------------------------------------------ 全局
+  - id: r-g01
+    type: global
+    question: "这门课的主线是什么？用两三句话概括。"
+    expect_keypoints:
+      - ["Root"]
+      - ["检测"]
+      - ["反制", "绕过", "Hook", "对抗"]
+
+  - id: r-g02
+    type: global
+    question: "老师讲到的 Root 检测方法至少包括哪些？（举出不少于三种）"
+    expect_keypoints:
+      - ["su"]
+      - ["test-keys", "Build", "Debuggable"]
+      - ["busybox", "Busybox", "Superuser", "su_test", "checkGetRootAuth"]
+
+  - id: r-g03
+    type: global
+    question: "反制/绕过 Root 检测时，老师主要 Hook 了哪两个底层相关函数？"
+    expect_keypoints:
+      - ["openat"]
+      - ["execve"]
+
+  - id: r-g04
+    type: global
+    question: "小米手机获取 Root 的大致流程里，解锁之后还能做什么？"
+    expect_keypoints:
+      - ["解锁"]
+      - ["REC", "开发版", "刷", "面具", "Magisk"]
+
+  - id: r-g05
+    type: global
+    question: "Hook openat 时打印日志可能导致什么问题？老师怎么说的？"
+    expect_keypoints:
+      - ["卡死", "ANR", "卡住"]
+      - ["日志", "打印", "openat"]
+    expect_time: "39:30"

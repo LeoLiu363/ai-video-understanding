@@ -32,6 +32,7 @@ from vedioai.eval_runner import (  # noqa: E402,F401
     scaffold,
     score_citation,
     score_keypoints,
+    strip_extension_blocks,
     summarize,
 )
 

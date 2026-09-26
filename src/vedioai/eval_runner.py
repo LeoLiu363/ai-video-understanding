@@ -55,15 +55,37 @@ class KeypointResult:
         return self.hit / self.total if self.total else 0.0
 
 
+def strip_extension_blocks(answer: str) -> str:
+    """评分时忽略「> **拓展**」段落，避免课外补充干扰要点命中。"""
+    text = answer or ""
+    # 连续引用行组成的拓展块（含首行 > **拓展**）
+    lines = text.splitlines()
+    out: list[str] = []
+    skipping = False
+    for line in lines:
+        stripped = line.lstrip()
+        if stripped.startswith(">") and "拓展" in stripped[:20]:
+            skipping = True
+            continue
+        if skipping:
+            if stripped.startswith(">"):
+                continue
+            skipping = False
+        out.append(line)
+    return "\n".join(out)
+
+
 def score_keypoints(answer: str, keypoints: list) -> KeypointResult:
     """要点命中率。
 
     每个要点可以是：
       - 字符串：答案里出现该串即命中
       - 数组：命中其中任一写法即命中（技术名词写法多样，不要因此判错）
+
+    评分前剥掉「> **拓展**」引用块，避免课外补充把课内要点判定搅乱。
     """
     result = KeypointResult()
-    norm_answer = normalize(answer)
+    norm_answer = normalize(strip_extension_blocks(answer))
     for item in keypoints or []:
         alternatives = item if isinstance(item, list) else [item]
         alternatives = [str(a) for a in alternatives if str(a).strip()]
