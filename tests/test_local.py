@@ -1927,7 +1927,7 @@ def test_qa_prompts_allow_labeled_extension_but_keep_grounding():
 
 
 def test_segments_to_webvtt_and_search(store: Store, sample_video: Video):
-    from vedioai.schema import Segment
+    from vedioai.schema import Segment, Chunk, Chapter, Slide
     from vedioai.subtitles import segments_to_webvtt
 
     segs = [
@@ -1943,6 +1943,42 @@ def test_segments_to_webvtt_and_search(store: Store, sample_video: Video):
     hits = store.search_segments("v1", "归并排序", top_k=5)
     assert hits and hits[0]["idx"] == 1
     assert "归并" in hits[0]["text"]
+
+    # 口播听错、课件/标题写对：搜索仍应命中（真实事故：ptrace → Pycharm）
+    store.replace_chunks(
+        "v1",
+        [
+            Chunk(
+                chunk_id="v1-c0000",
+                idx=0,
+                start_ms=5000,
+                end_ms=8000,
+                text="这节课主要讲的是 Pycharm。",
+                ocr_text="ptrace_百度搜索",
+                title="ptrace 系统调用",
+            )
+        ],
+    )
+    store.replace_slides(
+        "v1",
+        [Slide(idx=0, start_ms=4000, end_ms=5000, image_path="x.jpg", ocr_text="Ptrace详解")],
+    )
+    store.replace_chapters(
+        "v1",
+        [
+            Chapter(
+                chapter_id="v1-ch0",
+                idx=0,
+                start_ms=0,
+                end_ms=10000,
+                title="ptrace 与调试器",
+                summary="",
+            )
+        ],
+    )
+    found = store.search_segments("v1", "ptrace", top_k=10)
+    assert found, "课件/标题里的 ptrace 应能搜到"
+    assert any("ptrace" in (h["text"] or "").casefold() for h in found)
 
 
 def test_append_course_correction_writes_auto_glossary(tmp_path: Path):

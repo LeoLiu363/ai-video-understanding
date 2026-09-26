@@ -1,8 +1,14 @@
-# vedioAI · 课程视频 AI 理解
+# vedioAI · AI Video Understanding / 课程视频 AI 理解
 
-播放本地课程视频，用 AI 理解**全部内容**，支持问答、总结、生成学习文档。
+**AI video understanding for local course lectures** — turn classroom recordings into
+timestamped transcripts, slide OCR, searchable notes, and grounded Q&A.
 
-核心思路只有一句：**一次入库、多次查询**。
+中文课程视频本地入库后，用 AI 理解**全部内容**：语音转写 + 课件 OCR、带时间戳问答、
+学习文档、课内搜索。核心思路只有一句：**一次入库、多次查询**。
+
+Keywords / 关键词: AI video understanding, lecture video AI, course video RAG,
+speech-to-text, slide OCR, timestamped Q&A, 课程视频AI理解, 视频理解, 网课转写,
+课件OCR, 带引用问答
 
 ```
 本地课程视频

@@ -192,6 +192,36 @@ def query_terms(text: str) -> list[str]:
     return seen
 
 
+def _clip_around(needle: str, text: str, radius: int = 60) -> str:
+    if not text:
+        return ""
+    low = text.casefold()
+    i = low.find((needle or "").casefold())
+    if i < 0:
+        return ""
+    a = max(0, i - radius)
+    b = min(len(text), i + len(needle) + radius)
+    prefix = "…" if a > 0 else ""
+    suffix = "…" if b < len(text) else ""
+    return prefix + text[a:b].replace("\n", " ") + suffix
+
+
+def _search_snippet(needle: str, *parts: str | None) -> str:
+    """优先展示含关键词的字段，便于用户一眼看到为什么命中。"""
+    for part in parts:
+        if not part:
+            continue
+        clipped = _clip_around(needle, part)
+        if clipped:
+            return clipped
+        if needle.casefold() in part.casefold():
+            return part.replace("\n", " ")[:120]
+    for part in parts:
+        if part and part.strip():
+            return part.replace("\n", " ")[:120]
+    return ""
+
+
 def _pack(vec: np.ndarray) -> bytes:
     return struct.pack(f"<{len(vec)}f", *vec.astype(np.float32).tolist())
 
@@ -565,41 +595,190 @@ class Store:
     def search_segments(
         self, video_id: str, query: str, top_k: int = 20
     ) -> list[dict]:
-        """课内句级关键词搜索（segments_fts）。
+        """课内关键词搜索，返回可跳转的命中列表。
 
-        返回 [{idx, start_ms, end_ms, text, score}, ...]，按相关度降序。
-        供界面搜索面板与跳转使用；与 search_keyword（块级）互补。
+        只搜句级转写不够：ASR 常把专有名词听错（本课把 ptrace 听成 Pycharm），
+        而课件 OCR / 块标题 / 章节名往往仍是正确写法。所以一并查：
+          1. segments_fts（口播）
+          2. chunks_fts（口播+课件融合）+ 块标题/摘要 LIKE
+          3. slides.ocr_text LIKE
+          4. chapters.title LIKE
+
+        返回 [{idx?, start_ms, end_ms, text, score, source}, ...]，按相关度降序。
         """
-        terms = query_terms(query)
-        if not terms:
+        q = (query or "").strip()
+        if not q:
             return []
-        match_expr = " OR ".join(terms)
-        try:
-            rows = self.conn.execute(
-                """
-                SELECT s.idx, s.start_ms, s.end_ms, s.text,
-                       bm25(segments_fts) AS score
-                FROM segments_fts
-                JOIN segments s
-                  ON s.video_id = segments_fts.video_id AND s.idx = segments_fts.idx
-                WHERE segments_fts MATCH ? AND segments_fts.video_id = ?
-                ORDER BY score
-                LIMIT ?
-                """,
-                (match_expr, video_id, top_k),
-            ).fetchall()
-        except sqlite3.OperationalError:
-            return []
-        return [
-            {
-                "idx": int(r["idx"]),
-                "start_ms": int(r["start_ms"]),
-                "end_ms": int(r["end_ms"]),
-                "text": r["text"] or "",
-                "score": -float(r["score"]),
-            }
-            for r in rows
-        ]
+        terms = query_terms(q)
+        # 英文标识符 / 短词：FTS 可能因分词边界漏掉，保留原始串做 LIKE
+        like_l = f"%{q.casefold()}%"
+        hits: list[dict] = []
+        seen_ms: set[int] = set()
+
+        def add(item: dict) -> None:
+            ms = int(item.get("start_ms") or 0)
+            # 同一秒附近去重，避免 OCR 与块标题重复刷屏
+            key = ms // 2000
+            if key in seen_ms:
+                return
+            seen_ms.add(key)
+            hits.append(item)
+
+        # --- 1. 句级转写 FTS
+        if terms:
+            match_expr = " OR ".join(terms)
+            try:
+                rows = self.conn.execute(
+                    """
+                    SELECT s.idx, s.start_ms, s.end_ms, s.text,
+                           bm25(segments_fts) AS score
+                    FROM segments_fts
+                    JOIN segments s
+                      ON s.video_id = segments_fts.video_id AND s.idx = segments_fts.idx
+                    WHERE segments_fts MATCH ? AND segments_fts.video_id = ?
+                    ORDER BY score
+                    LIMIT ?
+                    """,
+                    (match_expr, video_id, top_k),
+                ).fetchall()
+                for r in rows:
+                    add(
+                        {
+                            "idx": int(r["idx"]),
+                            "start_ms": int(r["start_ms"]),
+                            "end_ms": int(r["end_ms"]),
+                            "text": r["text"] or "",
+                            "score": -float(r["score"]) + 10.0,  # 口播命中略加权
+                            "source": "segment",
+                        }
+                    )
+            except sqlite3.OperationalError:
+                pass
+
+        # 句级 LIKE 兜底（英专有名词、FTS 漏切）
+        rows = self.conn.execute(
+            """
+            SELECT idx, start_ms, end_ms, text FROM segments
+            WHERE video_id=? AND lower(text) LIKE ?
+            ORDER BY start_ms LIMIT ?
+            """,
+            (video_id, like_l, top_k),
+        ).fetchall()
+        for r in rows:
+            add(
+                {
+                    "idx": int(r["idx"]),
+                    "start_ms": int(r["start_ms"]),
+                    "end_ms": int(r["end_ms"]),
+                    "text": r["text"] or "",
+                    "score": 8.0,
+                    "source": "segment",
+                }
+            )
+
+        # --- 2. 语义块 FTS（含课件 OCR）
+        if terms:
+            match_expr = " OR ".join(terms)
+            try:
+                rows = self.conn.execute(
+                    """
+                    SELECT c.chunk_id, c.idx, c.start_ms, c.end_ms, c.title,
+                           c.text, c.ocr_text, bm25(chunks_fts) AS score
+                    FROM chunks_fts
+                    JOIN chunks c ON c.chunk_id = chunks_fts.chunk_id
+                    WHERE chunks_fts MATCH ? AND chunks_fts.video_id = ?
+                    ORDER BY score
+                    LIMIT ?
+                    """,
+                    (match_expr, video_id, top_k),
+                ).fetchall()
+                for r in rows:
+                    snippet = _search_snippet(q, r["title"], r["ocr_text"], r["text"])
+                    add(
+                        {
+                            "idx": int(r["idx"]),
+                            "start_ms": int(r["start_ms"]),
+                            "end_ms": int(r["end_ms"]),
+                            "text": snippet,
+                            "score": -float(r["score"]) + 5.0,
+                            "source": "chunk",
+                        }
+                    )
+            except sqlite3.OperationalError:
+                pass
+
+        # 块标题 / 摘要 LIKE（标题不进 FTS body，但常是正确专名）
+        rows = self.conn.execute(
+            """
+            SELECT idx, start_ms, end_ms, title, summary, text, ocr_text FROM chunks
+            WHERE video_id=? AND (
+                lower(title) LIKE ? OR lower(summary) LIKE ?
+                OR lower(ocr_text) LIKE ? OR lower(text) LIKE ?
+            )
+            ORDER BY start_ms LIMIT ?
+            """,
+            (video_id, like_l, like_l, like_l, like_l, top_k),
+        ).fetchall()
+        for r in rows:
+            snippet = _search_snippet(q, r["title"], r["summary"], r["ocr_text"], r["text"])
+            add(
+                {
+                    "idx": int(r["idx"]),
+                    "start_ms": int(r["start_ms"]),
+                    "end_ms": int(r["end_ms"]),
+                    "text": snippet,
+                    "score": 6.0,
+                    "source": "chunk",
+                }
+            )
+
+        # --- 3. 课件 OCR
+        rows = self.conn.execute(
+            """
+            SELECT idx, start_ms, end_ms, ocr_text FROM slides
+            WHERE video_id=? AND lower(ocr_text) LIKE ?
+            ORDER BY start_ms LIMIT ?
+            """,
+            (video_id, like_l, top_k),
+        ).fetchall()
+        for r in rows:
+            ocr = r["ocr_text"] or ""
+            snippet = _clip_around(q, ocr, 80) or ocr[:120]
+            add(
+                {
+                    "idx": int(r["idx"]),
+                    "start_ms": int(r["start_ms"]),
+                    "end_ms": int(r["end_ms"] or r["start_ms"]),
+                    "text": f"[课件] {snippet}",
+                    "score": 4.0,
+                    "source": "slide",
+                }
+            )
+
+        # --- 4. 章节标题
+        rows = self.conn.execute(
+            """
+            SELECT idx, start_ms, end_ms, title, summary FROM chapters
+            WHERE video_id=? AND (lower(title) LIKE ? OR lower(summary) LIKE ?)
+            ORDER BY start_ms LIMIT ?
+            """,
+            (video_id, like_l, like_l, top_k),
+        ).fetchall()
+        for r in rows:
+            title = r["title"] or f"第 {int(r['idx']) + 1} 章"
+            add(
+                {
+                    "idx": int(r["idx"]),
+                    "start_ms": int(r["start_ms"]),
+                    "end_ms": int(r["end_ms"]),
+                    "text": f"[章节] {title}",
+                    "score": 7.0,
+                    "source": "chapter",
+                }
+            )
+
+        hits.sort(key=lambda h: (-float(h["score"]), int(h["start_ms"])))
+        return hits[:top_k]
 
     # ------------------------------------------------------------------ 用量账
 

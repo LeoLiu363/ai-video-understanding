@@ -1,9 +1,17 @@
 # 环境与密钥
 .env
 .env.local
+.env.*
+!.env.example
 *.key
+*.pem
+credentials.json
+**/secrets/**
 
-# 数据目录（入库产物：转写、幻灯片图、播放代理、向量）
+# 机器生成的术语表（可能含课内纠错，手写主表可进库）
+vedioai.glossary.auto.yaml
+
+# 数据目录（入库产物：转写、幻灯片图、播放代理、向量、上传暂存）
 data/
 *.db
 *.db-wal
@@ -39,3 +47,4 @@ tmp/
 *.restored
 *.replayed
 *.corrupted.bak
+*.log
