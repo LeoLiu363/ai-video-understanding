@@ -2022,3 +2022,157 @@ def test_series_groups_by_parent_dir():
     assert series_id_for(r"D:\courses\Android\a.mp4") == "Android"
     assert series_label("_ungrouped") == "未分组"
 
+
+def test_looks_like_url_distinguishes_paths():
+    from vedioai.ingest.download import looks_like_url, normalize_url, source_id_for_url
+
+    assert looks_like_url("https://www.bilibili.com/video/BV1xx")
+    assert looks_like_url("www.bilibili.com/video/BV1xx")
+    assert looks_like_url("https://youtu.be/abc")
+    assert not looks_like_url(r"D:\courses\a.mp4")
+    assert not looks_like_url(r"C:/videos/lesson.mkv")
+    assert not looks_like_url("")
+
+    u = normalize_url("www.bilibili.com/video/BV1xx")
+    assert u.startswith("https://")
+    a = source_id_for_url("https://www.bilibili.com/video/BV1xx")
+    b = source_id_for_url("https://www.bilibili.com/video/BV1xx/")
+    assert a == b
+    assert len(a) == 16
+
+
+def test_cookie_save_and_clear(tmp_path: Path):
+    from vedioai.ingest.download import clear_cookies, cookie_status, save_cookies
+
+    data = tmp_path / "data"
+    data.mkdir()
+    bad = "not a cookie file"
+    with pytest.raises(ValueError):
+        save_cookies(data, bad)
+
+    netscape = (
+        "# Netscape HTTP Cookie File\n"
+        ".bilibili.com\tTRUE\t/\tFALSE\t0\tSESSDATA\tabc123\n"
+    )
+    st = save_cookies(data, netscape)
+    assert st["present"] is True
+    assert st["lines"] == 1
+    assert cookie_status(data)["present"] is True
+    clear_cookies(data)
+    assert cookie_status(data)["present"] is False
+
+
+def test_ytdlp_is_importable():
+    from vedioai.ingest.download import ytdlp_available
+
+    assert ytdlp_available() is True
+
+
+def test_resolve_ffmpeg_location_uses_path():
+    from vedioai.ingest.download import resolve_ffmpeg_location
+
+    loc = resolve_ffmpeg_location("ffmpeg")
+    assert loc is not None
+    assert (Path(loc) / "ffmpeg.exe").exists() or (Path(loc) / "ffmpeg").exists()
+
+
+def test_ollama_client_bypasses_system_proxy():
+    """本机 Ollama 必须 trust_env=False，否则系统代理会掐掉 127.0.0.1。"""
+    from vedioai.embedding import _ollama_client
+
+    with _ollama_client(timeout=5.0) as client:
+        assert client.trust_env is False
+        resp = client.get("http://127.0.0.1:11434/api/tags")
+        assert resp.status_code == 200
+        names = [m.get("name", "") for m in (resp.json().get("models") or [])]
+        assert any(n.split(":")[0] == "bge-m3" for n in names)
+
+
+# --------------------------------------------------------------------- 文档课
+
+
+def test_parse_document_splits_by_headings():
+    from vedioai.ingest.document import parse_document
+
+    text = "# 第一章\n\n这是导言后的正文。\n\n## 1.1 细节\n\n更多内容写在这里。\n" * 3
+    parsed = parse_document(text, "doc1", title="测试课")
+    assert parsed.title
+    assert len(parsed.chapters) >= 2
+    assert len(parsed.chunks) >= 2
+    assert all(c.start_ms < c.end_ms for c in parsed.chunks)
+    assert parsed.duration_ms > 0
+    assert all(c.parent_id for c in parsed.chunks)
+
+
+def test_parse_document_plain_text_one_chapter():
+    from vedioai.ingest.document import parse_document
+
+    text = "没有标题的一段话。\n\n第二段继续讲。"
+    parsed = parse_document(text, "doc2")
+    assert len(parsed.chapters) == 1
+    assert len(parsed.chunks) >= 1
+
+
+def test_list_document_files_folder_and_dedupe(tmp_path: Path):
+    from vedioai.ingest.document import list_document_files
+
+    a = tmp_path / "a.md"
+    b = tmp_path / "sub" / "b.txt"
+    b.parent.mkdir()
+    a.write_text("# A\n\nhello", encoding="utf-8")
+    b.write_text("plain", encoding="utf-8")
+    (tmp_path / "skip.mp4").write_bytes(b"x")
+
+    found = list_document_files(paths=[a], folder=tmp_path)
+    assert len(found) == 2
+    names = {p.name for p in found}
+    assert names == {"a.md", "b.txt"}
+
+
+def test_store_video_kind_roundtrip(store: Store):
+    from vedioai.schema import ContentKind
+
+    video = Video(
+        video_id="d1",
+        path="D:/notes/x.md",
+        title="文档课",
+        duration_ms=0,
+        status=VideoStatus.READY,
+        kind=ContentKind.DOCUMENT,
+    )
+    store.upsert_video(video)
+    got = store.get_video("d1")
+    assert got is not None
+    assert got.kind == ContentKind.DOCUMENT
+    items = store.list_videos()
+    assert items[0]["kind"] == "document"
+
+
+def test_run_document_skip_summary(store: Store, tmp_path: Path):
+    from vedioai.config import Config
+    from vedioai.pipeline import IngestPipeline
+    from vedioai.schema import ContentKind
+
+    doc = tmp_path / "lesson.md"
+    doc.write_text(
+        "# 排序\n\n冒泡排序很慢。\n\n## 快排\n\n快排平均更快。\n\n段落再补一点内容保证能切块。\n",
+        encoding="utf-8",
+    )
+    cfg = Config()
+    cfg.data_dir = tmp_path / "data"
+    cfg.data_dir.mkdir(parents=True)
+
+    video = IngestPipeline(cfg, store, llm=None, embedder=None).run_document(
+        doc, skip_summary=True
+    )
+    assert video.kind == ContentKind.DOCUMENT
+    assert video.status == VideoStatus.READY
+    assert store.get_chapters(video.video_id)
+    assert store.get_chunks(video.video_id)
+    assert not store.get_segments(video.video_id)
+    source = cfg.library_dir / video.video_id / "source.md"
+    assert source.exists()
+    assert "排序" in source.read_text(encoding="utf-8")
+    # 文档课不应留下视频笔记
+    assert not (cfg.library_dir / video.video_id / "notes.md").exists()
+

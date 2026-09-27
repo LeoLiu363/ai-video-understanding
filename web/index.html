@@ -83,6 +83,19 @@
 
   .player-wrap { background: #000; }
   video { width: 100%; max-height: 46vh; display: block; background: #000; }
+  .doc-reader {
+    display: none; flex: 1; min-height: 280px; max-height: 46vh; overflow: auto;
+    padding: 16px 20px; background: var(--panel-2); border-bottom: 1px solid var(--line);
+    font-size: 14px; line-height: 1.65;
+  }
+  .doc-reader.visible { display: block; }
+  .doc-reader h1, .doc-reader h2, .doc-reader h3 { scroll-margin-top: 12px; }
+  .kind-tag {
+    display: inline-block; font-size: 10px; font-weight: 600; letter-spacing: .03em;
+    padding: 1px 6px; border-radius: 4px; margin-right: 6px; vertical-align: 1px;
+    border: 1px solid var(--line); color: var(--muted);
+  }
+  .kind-tag.doc { color: #7dd3c0; border-color: #2a4a44; }
   .player-meta {
     display: flex; align-items: center; gap: 10px; padding: 8px 14px;
     border-bottom: 1px solid var(--line); font-size: 12px; color: var(--muted);
@@ -280,6 +293,27 @@
   .reader-content .inner { max-width: 900px; margin: 0 auto; }
   .reader-empty { max-width: 560px; margin: 60px auto; text-align: center; }
 
+  /* ------------------------------------------------ 测验 */
+  .quiz-q {
+    border: 1px solid var(--line); border-radius: 10px;
+    padding: 12px 14px; margin-bottom: 10px; background: var(--panel-2);
+  }
+  .quiz-q .stem { font-weight: 600; margin-bottom: 8px; line-height: 1.45; }
+  .quiz-q label.opt {
+    display: flex; gap: 8px; align-items: flex-start;
+    padding: 5px 0; cursor: pointer; color: var(--text); font-size: 13px;
+  }
+  .quiz-q label.opt input { margin-top: 3px; }
+  .quiz-q.ok { border-color: #2f6f4e; }
+  .quiz-q.bad { border-color: #8a3b3b; }
+  .quiz-explain {
+    margin-top: 8px; padding: 8px 10px; border-radius: 8px;
+    background: #121820; color: var(--muted); font-size: 12.5px; line-height: 1.5;
+  }
+  .quiz-score {
+    font-size: 20px; font-weight: 600; margin: 8px 0 12px;
+  }
+
   /* ------------------------------------------------ 用量账本 */
   .usage-sec { margin-top: 16px; }
   .usage-h {
@@ -324,16 +358,31 @@
     <div class="col-head">课程库</div>
     <div class="pad">
       <div class="row">
-        <input id="ingest-path" placeholder="粘贴本地视频完整路径，如 D:\courses\a.mp4" />
+        <input id="ingest-path" placeholder="本地路径或视频链接（B站 / YouTube / 直链）" />
       </div>
       <div class="row" style="margin-top:8px">
         <button class="primary" id="btn-ingest" style="flex:1">入库</button>
         <label class="ghost" style="padding:8px 12px;cursor:pointer;border:1px solid var(--line);border-radius:8px">
-          选文件<input type="file" id="ingest-file" accept="video/*,.mkv,.flv,.ts" hidden />
+          选视频<input type="file" id="ingest-file" accept="video/*,.mkv,.flv,.ts" hidden />
+        </label>
+        <label class="ghost" style="padding:8px 12px;cursor:pointer;border:1px solid var(--line);border-radius:8px" title="多选 .md / .txt">
+          导入文档<input type="file" id="ingest-docs-file" accept=".md,.txt,.markdown,text/markdown,text/plain" multiple hidden />
         </label>
         <button class="ghost" id="btn-refresh" title="刷新">刷新</button>
       </div>
-      <div id="dropzone" class="dropzone">也可把视频拖到这里（填入本机路径）</div>
+      <div class="row" style="margin-top:8px">
+        <input id="docs-folder" placeholder="文档目录路径（批量导入同目录/子目录 .md/.txt）" />
+        <button class="ghost" id="btn-ingest-docs-folder" style="white-space:nowrap">导入目录</button>
+      </div>
+      <div class="row" style="margin-top:8px;gap:8px;align-items:center;flex-wrap:wrap">
+        <label class="ghost" style="padding:6px 10px;cursor:pointer;border:1px solid var(--line);border-radius:8px;font-size:12px" title="导入浏览器导出的 Netscape cookies.txt">
+          导入 Cookie
+          <input type="file" id="cookie-file" accept=".txt,text/plain" hidden />
+        </label>
+        <button class="ghost" id="btn-cookie-clear" style="padding:6px 10px;font-size:12px" title="清除已保存的登录 Cookie">清除 Cookie</button>
+        <span id="cookie-status" class="hint" style="font-size:12px">Cookie：检查中…</span>
+      </div>
+      <div id="dropzone" class="dropzone">可拖入视频或文档（.md/.txt）；链接请粘贴到上方输入框</div>
       <div id="ingest-progress" class="hidden" style="margin-top:10px">
         <div class="progress"><i id="ingest-bar"></i></div>
         <div class="status-line" id="ingest-status"></div>
@@ -351,11 +400,12 @@
 
   <!-- ---------------------------------------------------------- 播放器 -->
   <section class="col" id="col-player">
-    <div class="player-wrap">
+    <div class="player-wrap" id="player-wrap">
       <video id="player" controls preload="metadata">
         <track id="subtitle-track" kind="subtitles" srclang="zh" label="转写" default />
       </video>
     </div>
+    <div id="doc-reader" class="doc-reader" aria-label="文档阅读区"></div>
     <div class="player-meta">
       <strong id="video-title">未选择课程</strong>
       <span id="video-duration"></span>
@@ -401,6 +451,7 @@
       <div class="tabs" style="margin-bottom:10px">
         <button id="tab-ask" class="on">问答</button>
         <button id="tab-notes">学习文档</button>
+        <button id="tab-quiz">测验</button>
         <button id="tab-usage">用量</button>
       </div>
 
@@ -435,6 +486,27 @@
         </div>
         <p class="hint" id="notes-empty" style="margin-top:10px"></p>
         <div id="notes-out" class="notes-out hidden" style="margin-top:10px"></div>
+      </div>
+
+      <!-- 课内测验 -->
+      <div id="panel-quiz" class="hidden">
+        <p class="hint">根据当前课程出选择题，提交后看得分与每题讲解（可点时间跳转）。摘要越完整，出题质量越好。</p>
+        <div class="row" style="gap:8px;align-items:center;flex-wrap:wrap">
+          <label class="hint" style="display:flex;align-items:center;gap:6px">
+            题量
+            <select id="quiz-count" style="width:auto">
+              <option value="5">5</option>
+              <option value="8" selected>8</option>
+              <option value="12">12</option>
+            </select>
+          </label>
+          <button class="primary" id="btn-quiz-gen">出题</button>
+          <button class="ghost hidden" id="btn-quiz-submit">交卷</button>
+          <button class="ghost hidden" id="btn-quiz-retry">再来一套</button>
+        </div>
+        <div id="quiz-status" class="hint" style="margin-top:8px"></div>
+        <div id="quiz-error" class="err" style="margin-top:6px"></div>
+        <div id="quiz-board" style="margin-top:10px"></div>
       </div>
 
       <!-- 用量账本 -->
@@ -484,6 +556,8 @@ let current = null;       // 当前课程的详情
 let currentId = null;
 let currentSessionId = null;
 let pollTimer = null;
+let currentQuiz = null;   // 当前测验卷（无答案）
+let quizGraded = false;
 
 /* ---------------------------------------------------------------- 工具 */
 
@@ -494,12 +568,77 @@ function fmt(ms) {
   return h ? `${h}:${pad(m)}:${pad(s)}` : `${pad(m)}:${pad(s)}`;
 }
 
+function isDocumentCourse(v) {
+  const kind = (v || current?.video || {}).kind;
+  return kind === "document";
+}
+
 function seek(ms) {
+  if (isDocumentCourse()) {
+    scrollDocToMs(ms);
+    return;
+  }
   const v = $("player");
   if (!v.src) return;
   v.currentTime = Math.max(0, ms / 1000);
   v.play().catch(() => {});
   v.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+function scrollDocToMs(ms) {
+  const chs = current?.chapters || [];
+  if (!chs.length) return;
+  let target = chs[0];
+  for (const c of chs) {
+    if (c.start_ms <= ms) target = c;
+  }
+  const el = document.getElementById(`doc-ch-${target.chapter_id}`);
+  if (el) {
+    el.scrollIntoView({ behavior: "smooth", block: "start" });
+    $("doc-reader").scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }
+}
+
+function setDocumentMode(on) {
+  $("player-wrap").style.display = on ? "none" : "";
+  $("doc-reader").classList.toggle("visible", on);
+  $("tab-transcript").style.display = on ? "none" : "";
+  $("tab-notes").style.display = on ? "none" : "";
+  $("use-position").closest("label").style.display = on ? "none" : "";
+  if (on && $("panel-notes") && !$("panel-notes").classList.contains("hidden")) {
+    showTab("ask");
+  }
+  if (on && !$("panel-transcript").classList.contains("hidden")) {
+    setPlayerTab("chapters");
+  }
+}
+
+async function loadDocumentReader(videoId) {
+  const box = $("doc-reader");
+  box.innerHTML = `<span class="hint">加载原文…</span>`;
+  try {
+    const doc = await api(`/api/library/${videoId}/document`);
+    box.innerHTML = md(doc.markdown || "");
+    const heads = [...box.querySelectorAll("h1,h2,h3")];
+    const chs = current?.chapters || [];
+    let hi = 0;
+    chs.forEach((ch, i) => {
+      if (i === 0 && ch.title === "导言") {
+        const a = document.createElement("div");
+        a.id = `doc-ch-${ch.chapter_id}`;
+        a.dataset.ms = String(ch.start_ms);
+        box.prepend(a);
+        return;
+      }
+      const h = heads[hi++];
+      if (h) {
+        h.id = `doc-ch-${ch.chapter_id}`;
+        h.dataset.ms = String(ch.start_ms);
+      }
+    });
+  } catch (e) {
+    box.innerHTML = `<span class="err">${esc(e.message)}</span>`;
+  }
 }
 
 function esc(s) {
@@ -718,7 +857,7 @@ async function loadLibrary() {
   const data = await api("/api/library");
   const box = $("library");
   if (!data.items.length) {
-    box.innerHTML = `<div class="pad hint">课程库为空。粘贴路径、选文件或拖拽后点「入库」。</div>`;
+    box.innerHTML = `<div class="pad hint">课程库为空。粘贴路径或链接、选文件或拖拽后点「入库」。</div>`;
     $("series-ask-bar").classList.add("hidden");
     return;
   }
@@ -732,13 +871,21 @@ async function loadLibrary() {
   );
   box.innerHTML = keys.map((sid) => {
     const g = groups[sid];
-    const rows = g.items.map((v) => `
-      <div class="lib-item ${v.video_id === currentId ? "active" : ""}" data-id="${v.video_id}" data-series="${esc(sid)}">
-        <div class="t">${esc(v.title || "未命名")}</div>
-        <div class="m">${esc(v.duration_label)} · ${v.chapter_count} 章 · ${
-          v.status === "ready" ? "就绪" : v.status === "failed" ? "失败" : v.status}</div>
+    const rows = g.items.map((v) => {
+      const isDoc = (v.kind || "video") === "document";
+      const kind = isDoc
+        ? `<span class="kind-tag doc">文档</span>`
+        : `<span class="kind-tag">视频</span>`;
+      const meta = isDoc
+        ? `${v.chapter_count} 章 · ${esc(statusLabel(v.status))}`
+        : `${esc(v.duration_label)} · ${v.chapter_count} 章 · ${esc(statusLabel(v.status))}`;
+      return `
+      <div class="lib-item ${v.video_id === currentId ? "active" : ""}" data-id="${v.video_id}" data-series="${esc(sid)}" data-kind="${esc(v.kind || "video")}">
+        <div class="t">${kind}${esc(v.title || "未命名")}</div>
+        <div class="m">${meta}</div>
         <button class="ghost del" data-del="${v.video_id}" title="删除课程">×</button>
-      </div>`).join("");
+      </div>`;
+    }).join("");
     return `<div class="series-head" data-series="${esc(sid)}">${esc(g.label)} · ${g.items.length} 门</div>${rows}`;
   }).join("");
 
@@ -761,6 +908,8 @@ async function loadLibrary() {
           $("video-title").textContent = "未选择课程";
           $("player").removeAttribute("src");
           $("player").load();
+          $("doc-reader").innerHTML = "";
+          setDocumentMode(false);
         }
         await loadLibrary();
       } catch (e) { alert(e.message); }
@@ -778,28 +927,35 @@ async function loadLibrary() {
 async function openVideo(id) {
   currentId = id;
   current = await api(`/api/library/${id}`);
+  resetQuizUi("点「出题」根据本课材料生成选择题。");
   const v = current.video;
+  const docMode = isDocumentCourse(v);
   currentSeriesId = (await api("/api/library")).items.find((x) => x.video_id === id)?.series_id || null;
   $("video-title").textContent = v.title || "未命名";
-  $("video-duration").textContent = v.duration_label;
+  $("video-duration").textContent = docMode ? "文档课" : v.duration_label;
+  setDocumentMode(docMode);
 
   const player = $("player");
   const track = $("subtitle-track");
-  // 先卸旧轨，避免换课时叠多条
   track.removeAttribute("src");
-  player.src = `/media/${id}`;
-  track.src = `/api/subtitles/${id}.vtt`;
-  player.load();
-
-  // 续播：有进度且未看完（距结尾 > 5s）则跳回
-  const saved = Number(localStorage.getItem(`vedioai.progress.${id}`) || 0);
-  const onMeta = () => {
-    player.removeEventListener("loadedmetadata", onMeta);
-    if (saved > 5 && player.duration && saved < player.duration - 5) {
-      player.currentTime = saved;
-    }
-  };
-  player.addEventListener("loadedmetadata", onMeta);
+  if (docMode) {
+    player.removeAttribute("src");
+    player.load();
+    await loadDocumentReader(id);
+  } else {
+    $("doc-reader").innerHTML = "";
+    player.src = `/media/${id}`;
+    track.src = `/api/subtitles/${id}.vtt`;
+    player.load();
+    const saved = Number(localStorage.getItem(`vedioai.progress.${id}`) || 0);
+    const onMeta = () => {
+      player.removeEventListener("loadedmetadata", onMeta);
+      if (saved > 5 && player.duration && saved < player.duration - 5) {
+        player.currentTime = saved;
+      }
+    };
+    player.addEventListener("loadedmetadata", onMeta);
+  }
 
   const list = $("chapters");
   if (!current.chapters.length) {
@@ -807,7 +963,7 @@ async function openVideo(id) {
   } else {
     list.innerHTML = current.chapters.map((c) => `
       <div class="chapter" data-ms="${c.start_ms}">
-        <span class="ts">${esc(c.label)}</span>
+        <span class="ts">${docMode ? "§" : esc(c.label)}</span>
         <span style="flex:1">
           <div class="tt">${esc(c.title)}</div>
           ${c.summary ? `<div class="sm">${esc(c.summary.slice(0, 220))}</div>` : ""}
@@ -818,15 +974,26 @@ async function openVideo(id) {
     });
   }
 
-  await loadTranscript(id);
-  $("search-panel").innerHTML = `<span class="hint">输入关键词查找本课转写。</span>`;
+  if (docMode) {
+    $("transcript").innerHTML = `<span class="hint">文档课无语音转写；请在上方阅读原文。</span>`;
+    transcriptSegs = [];
+  } else {
+    await loadTranscript(id);
+  }
+  $("search-panel").innerHTML = docMode
+    ? `<span class="hint">输入关键词查找本课内容。</span>`
+    : `<span class="hint">输入关键词查找本课转写。</span>`;
   $("search-q").value = "";
   $("fix-bar").classList.remove("show");
 
   $("chat").innerHTML = "";
   currentSessionId = null;
   await loadSessions(id);
-  await loadNotes(id);
+  if (!docMode) await loadNotes(id);
+  else {
+    notesDoc = { exists: false, markdown: "", meta: {} };
+    renderNotesPanel();
+  }
   await loadLibrary();
 }
 
@@ -927,15 +1094,24 @@ async function runSearch() {
 
 /* ---------------------------------------------------------------- 入库 */
 
+function looksLikeUrl(text) {
+  const t = (text || "").trim();
+  if (!t) return false;
+  if (/^[A-Za-z]:[\\/]/.test(t) || t.startsWith("\\\\")) return false;
+  if (/^https?:\/\//i.test(t)) return true;
+  return /^(?:www\.)?(?:bilibili\.com|b23\.tv|youtube\.com|youtu\.be|m\.bilibili\.com)\//i.test(t);
+}
+
 async function startIngest() {
   const path = $("ingest-path").value.trim();
   if (!path) return;
   $("ingest-error").textContent = "";
   $("btn-ingest").disabled = true;
   try {
+    const body = looksLikeUrl(path) ? { url: path } : { path };
     const job = await api("/api/ingest", {
       method: "POST",
-      body: JSON.stringify({ path }),
+      body: JSON.stringify(body),
     });
     $("ingest-progress").classList.remove("hidden");
     pollJob(job.job_id, "ingest");
@@ -964,34 +1140,151 @@ async function startIngestUpload(file) {
   }
 }
 
+function isDocFileName(name) {
+  return /\.(md|txt|markdown)$/i.test(name || "");
+}
+
+async function startDocsUpload(fileList) {
+  const files = [...(fileList || [])].filter((f) => isDocFileName(f.name));
+  if (!files.length) {
+    $("ingest-error").textContent = "请选择 .md / .txt / .markdown 文件";
+    return;
+  }
+  $("ingest-error").textContent = "";
+  $("btn-ingest").disabled = true;
+  $("ingest-progress").classList.remove("hidden");
+  $("ingest-status").textContent = `上传 ${files.length} 个文档…`;
+  try {
+    const fd = new FormData();
+    for (const f of files) fd.append("files", f, f.name);
+    const resp = await fetch("/api/ingest/docs/upload", { method: "POST", body: fd });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+    const ids = data.job_ids || [];
+    if (!ids.length) throw new Error("未创建入库任务");
+    pollJobs(ids, "ingest");
+  } catch (e) {
+    $("ingest-error").textContent = e.message;
+    $("btn-ingest").disabled = false;
+  }
+}
+
+async function startDocsFolder() {
+  const folder = $("docs-folder").value.trim();
+  if (!folder) {
+    $("ingest-error").textContent = "请填写文档目录路径";
+    return;
+  }
+  $("ingest-error").textContent = "";
+  $("btn-ingest").disabled = true;
+  $("ingest-progress").classList.remove("hidden");
+  $("ingest-status").textContent = "扫描目录并排队…";
+  try {
+    const data = await api("/api/ingest/docs", {
+      method: "POST",
+      body: JSON.stringify({ folder }),
+    });
+    const ids = data.job_ids || [];
+    if (!ids.length) throw new Error("目录下没有可导入的文档");
+    $("ingest-status").textContent = `已排队 ${ids.length} 门文档课`;
+    pollJobs(ids, "ingest");
+  } catch (e) {
+    $("ingest-error").textContent = e.message;
+    $("btn-ingest").disabled = false;
+  }
+}
+
+/** 同时盯多个入库任务（文档批量）。 */
+function pollJobs(jobIds, kind) {
+  const ids = [...new Set((jobIds || []).filter(Boolean))];
+  if (!ids.length) return;
+  if (ids.length === 1) {
+    pollJob(ids[0], kind);
+    return;
+  }
+  if (pollTimer) clearInterval(pollTimer);
+  const bar = $("ingest-bar");
+  const status = $("ingest-status");
+  const box = $("ingest-progress");
+  box.classList.remove("hidden");
+  $("btn-ingest").disabled = true;
+  try {
+    localStorage.setItem("vedioai.activeJob", JSON.stringify({ job_ids: ids, kind }));
+  } catch (e) { /* ignore */ }
+  const done = new Set();
+  const failed = [];
+  pollTimer = setInterval(async () => {
+    try {
+      let pctSum = 0;
+      for (const id of ids) {
+        if (done.has(id)) {
+          pctSum += 100;
+          continue;
+        }
+        const job = await api(`/api/jobs/${id}`);
+        const p = job.progress || {};
+        const pct = p.total ? (p.done / p.total) * 100 : (job.status === "done" ? 100 : 0);
+        pctSum += pct;
+        if (job.status === "done" || job.status === "failed") {
+          done.add(id);
+          if (job.status === "failed") failed.push(job.error || id);
+        }
+      }
+      const avg = pctSum / ids.length;
+      bar.style.width = `${avg}%`;
+      status.textContent = `批量入库 ${done.size}/${ids.length}` +
+        (failed.length ? `（失败 ${failed.length}）` : "");
+      if (done.size >= ids.length) {
+        clearInterval(pollTimer);
+        pollTimer = null;
+        $("btn-ingest").disabled = false;
+        try { localStorage.removeItem("vedioai.activeJob"); } catch (e) { /* ignore */ }
+        if (failed.length) {
+          $("ingest-error").textContent = `部分失败：${failed.slice(0, 3).join("；")}`;
+        }
+        await loadLibrary();
+      }
+    } catch (e) {
+      status.textContent = e.message;
+    }
+  }, 800);
+}
+
 function pollJob(jobId, kind) {
   if (pollTimer) clearInterval(pollTimer);
   const bar = kind === "ingest" ? $("ingest-bar") : $("notes-bar");
   const status = kind === "ingest" ? $("ingest-status") : $("notes-status");
   const box = kind === "ingest" ? $("ingest-progress") : $("notes-progress");
   box.classList.remove("hidden");
+  if (kind === "ingest") $("btn-ingest").disabled = true;
+  try {
+    localStorage.setItem("vedioai.activeJob", JSON.stringify({ job_id: jobId, kind }));
+  } catch (e) { /* ignore */ }
 
-  pollTimer = setInterval(async () => {
+  // 立刻拉一次，避免等满 1s 才有反馈
+  const tick = async () => {
     let job;
     try { job = await api(`/api/jobs/${jobId}`); }
-    catch (e) { clearInterval(pollTimer); return; }
+    catch (e) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+      return;
+    }
 
     bar.style.width = `${job.percent}%`;
     status.textContent = `${job.stage || ""} · ${job.message || ""}`;
 
     if (job.status === "done") {
       clearInterval(pollTimer);
+      pollTimer = null;
+      try { localStorage.removeItem("vedioai.activeJob"); } catch (e) {}
       status.textContent = "完成";
       if (kind === "ingest") {
         $("btn-ingest").disabled = false;
         await loadLibrary();
-        const vid = job.result.video_id;
+        const vid = job.result.video_id || job.video_id;
         if (vid) await openVideo(vid);
       } else {
-        // 生成完不直接用返回值渲染，而是回磁盘读一遍：
-        // 这样面板显示的永远是文件真实内容（含 NotesService 在失败时
-        // 保留旧文档的情况），而不是「本次调用以为写出了什么」。
-        // 用 job.video_id 而不是 currentId：用户可能在生成期间切了课程。
         const vid = job.video_id || currentId;
         if (vid === currentId) {
           await loadNotes(vid);
@@ -1002,6 +1295,8 @@ function pollJob(jobId, kind) {
       }
     } else if (job.status === "failed") {
       clearInterval(pollTimer);
+      pollTimer = null;
+      try { localStorage.removeItem("vedioai.activeJob"); } catch (e) {}
       status.textContent = "失败";
       if (kind === "ingest") {
         $("ingest-error").textContent = job.error || "入库失败";
@@ -1010,7 +1305,72 @@ function pollJob(jobId, kind) {
         $("notes-status").textContent = `失败：${job.error}`;
       }
     }
-  }, 1000);
+  };
+  tick();
+  pollTimer = setInterval(tick, 1000);
+}
+
+/** 刷新页面后接上仍在跑的入库/文档任务，避免进度条消失。 */
+async function resumeRunningJobs() {
+  let items = [];
+  try {
+    const data = await api("/api/jobs");
+    items = data.items || [];
+  } catch (e) {
+    items = [];
+  }
+  const runningIngest = items.filter((j) => j.status === "running" && j.kind === "ingest");
+  if (runningIngest.length > 1) {
+    pollJobs(runningIngest.map((j) => j.job_id), "ingest");
+    return;
+  }
+  const running = items.find((j) => j.status === "running" && (j.kind === "ingest" || j.kind === "notes" || j.kind === "summarize"));
+  if (running) {
+    pollJob(running.job_id, running.kind === "notes" ? "notes" : "ingest");
+    return;
+  }
+  // 服务端任务表空时（极少），尝试 localStorage 里记下的 job_id / job_ids
+  try {
+    const raw = localStorage.getItem("vedioai.activeJob");
+    if (!raw) return;
+    const saved = JSON.parse(raw);
+    if (saved?.job_ids?.length) {
+      const still = [];
+      for (const id of saved.job_ids) {
+        const job = await api(`/api/jobs/${id}`);
+        if (job.status === "running") still.push(id);
+      }
+      if (still.length) pollJobs(still, "ingest");
+      else localStorage.removeItem("vedioai.activeJob");
+      return;
+    }
+    if (!saved?.job_id) return;
+    const job = await api(`/api/jobs/${saved.job_id}`);
+    if (job.status === "running") {
+      pollJob(job.job_id, saved.kind === "notes" ? "notes" : "ingest");
+    } else {
+      localStorage.removeItem("vedioai.activeJob");
+    }
+  } catch (e) {
+    try { localStorage.removeItem("vedioai.activeJob"); } catch (e2) {}
+  }
+}
+
+const STATUS_LABEL = {
+  download: "拉取中",
+  probing: "探测中",
+  proxy: "转码中",
+  audio: "抽音频",
+  asr: "转写中",
+  slides: "课件 OCR",
+  summarize: "摘要中",
+  embedding: "建索引",
+  ready: "就绪",
+  failed: "失败",
+};
+
+function statusLabel(status) {
+  return STATUS_LABEL[status] || status || "";
 }
 
 /* ---------------------------------------------------------------- 会话 */
@@ -1436,6 +1796,10 @@ function flash(msg) {
 
 async function generateNotes() {
   if (!currentId) { alert("请先选择一门课程"); return; }
+  if (isDocumentCourse()) {
+    alert("文档课以原文为教材，无需再生成学习文档。");
+    return;
+  }
   const btn = $("btn-notes");
   btn.disabled = true;
   $("notes-out").classList.add("hidden");
@@ -1455,11 +1819,118 @@ async function generateNotes() {
   }
 }
 
-/* ---------------------------------------------------------------- 用量账本 */
+/* ---------------------------------------------------------------- 测验 */
+
+function resetQuizUi(msg) {
+  currentQuiz = null;
+  quizGraded = false;
+  $("quiz-board").innerHTML = "";
+  $("quiz-error").textContent = "";
+  $("quiz-status").textContent = msg || "";
+  $("btn-quiz-submit").classList.add("hidden");
+  $("btn-quiz-retry").classList.add("hidden");
+  $("btn-quiz-gen").disabled = false;
+}
+
+function renderQuiz(quiz) {
+  currentQuiz = quiz;
+  quizGraded = false;
+  $("quiz-error").textContent = "";
+  $("quiz-status").textContent = `共 ${quiz.count} 题 · 答完后点「交卷」`;
+  $("btn-quiz-submit").classList.remove("hidden");
+  $("btn-quiz-retry").classList.add("hidden");
+  $("quiz-board").innerHTML = (quiz.questions || []).map((q, i) => `
+    <div class="quiz-q" data-qid="${esc(q.id)}">
+      <div class="stem">${i + 1}. ${esc(q.stem)}
+        ${q.start_ms ? `<button class="ghost ts-link" data-ms="${q.start_ms}" style="margin-left:6px;padding:2px 6px;font-size:11px">${fmt(q.start_ms)}</button>` : ""}
+      </div>
+      ${["A","B","C","D"].map((k) => `
+        <label class="opt">
+          <input type="radio" name="quiz-${esc(q.id)}" value="${k}" />
+          <span><b>${k}.</b> ${esc(q.options[k] || "")}</span>
+        </label>`).join("")}
+    </div>`).join("");
+}
+
+async function generateQuiz() {
+  if (!currentId) {
+    $("quiz-error").textContent = "请先选择一门课程";
+    return;
+  }
+  $("quiz-error").textContent = "";
+  $("btn-quiz-gen").disabled = true;
+  $("quiz-status").textContent = "正在出题…";
+  $("quiz-board").innerHTML = "";
+  $("btn-quiz-submit").classList.add("hidden");
+  try {
+    const count = Number($("quiz-count").value) || 8;
+    const quiz = await api("/api/quiz", {
+      method: "POST",
+      body: JSON.stringify({ video_id: currentId, count }),
+    });
+    renderQuiz(quiz);
+  } catch (e) {
+    $("quiz-error").textContent = e.message;
+    $("quiz-status").textContent = "";
+  } finally {
+    $("btn-quiz-gen").disabled = false;
+  }
+}
+
+async function submitQuiz() {
+  if (!currentQuiz || quizGraded) return;
+  const answers = {};
+  let missing = 0;
+  for (const q of currentQuiz.questions || []) {
+    const picked = document.querySelector(`input[name="quiz-${q.id}"]:checked`);
+    if (!picked) missing += 1;
+    else answers[q.id] = picked.value;
+  }
+  if (missing) {
+    if (!confirm(`还有 ${missing} 题未作答，确定交卷？`)) return;
+  }
+  $("btn-quiz-submit").disabled = true;
+  try {
+    const result = await api(`/api/quiz/${currentQuiz.quiz_id}/submit`, {
+      method: "POST",
+      body: JSON.stringify({ answers }),
+    });
+    quizGraded = true;
+    $("quiz-status").innerHTML =
+      `<div class="quiz-score">${result.correct}/${result.total} 正确 · ${result.score} 分</div>`;
+    $("btn-quiz-submit").classList.add("hidden");
+    $("btn-quiz-retry").classList.remove("hidden");
+    $("quiz-board").innerHTML = (result.details || []).map((d, i) => `
+      <div class="quiz-q ${d.correct ? "ok" : "bad"}">
+        <div class="stem">${i + 1}. ${esc(d.stem)}
+          ${d.start_ms ? `<button class="ghost ts-link" data-ms="${d.start_ms}" style="margin-left:6px;padding:2px 6px;font-size:11px">${fmt(d.start_ms)}</button>` : ""}
+        </div>
+        ${["A","B","C","D"].map((k) => {
+          const mark = k === d.answer ? " ✓" : (k === d.chosen && !d.correct ? " ✗" : "");
+          const weight = (k === d.answer || k === d.chosen) ? "font-weight:600" : "";
+          return `<div class="opt" style="${weight}"><b>${k}.</b> ${esc(d.options[k] || "")}${mark}</div>`;
+        }).join("")}
+        <div class="quiz-explain">
+          ${d.correct ? "回答正确。" : `你的选择：${esc(d.chosen || "未答")}；正确答案：${esc(d.answer)}。`}
+          ${d.explanation ? `<br>${esc(d.explanation)}` : ""}
+        </div>
+      </div>`).join("");
+  } catch (e) {
+    $("quiz-error").textContent = e.message;
+  } finally {
+    $("btn-quiz-submit").disabled = false;
+  }
+}
+
+$("btn-quiz-gen").onclick = generateQuiz;
+$("btn-quiz-submit").onclick = submitQuiz;
+$("btn-quiz-retry").onclick = () => {
+  resetQuizUi(currentId ? "点「出题」再生成一套。" : "请先选择课程。");
+};
 
 const KIND_LABEL = {
   ask: "问答", notes: "学习文档", summarize: "分层摘要",
-  glossary: "术语表", asr: "语音转写", llm: "其他",
+  quiz: "测验", glossary: "术语表", asr: "语音转写", llm: "其他",
 };
 
 function yuan(v) {
@@ -1553,6 +2024,7 @@ async function loadUsage() {
 /* ---------------------------------------------------------------- 绑定 */
 
 $("btn-ingest").onclick = startIngest;
+$("btn-ingest-docs-folder").onclick = startDocsFolder;
 $("btn-refresh").onclick = loadLibrary;
 $("btn-ask").onclick = ask;
 $("btn-notes").onclick = generateNotes;
@@ -1574,6 +2046,52 @@ $("ingest-file").onchange = () => {
   const f = $("ingest-file").files?.[0];
   if (f) startIngestUpload(f);
 };
+$("ingest-docs-file").onchange = () => {
+  const list = $("ingest-docs-file").files;
+  if (list?.length) startDocsUpload(list);
+  $("ingest-docs-file").value = "";
+};
+
+async function refreshCookieStatus() {
+  const el = $("cookie-status");
+  try {
+    const st = await api("/api/cookies");
+    el.textContent = st.present
+      ? `Cookie：已导入（${st.lines} 条）`
+      : "Cookie：未导入（大会员/需登录内容时再导入）";
+    el.title = st.hint || "";
+  } catch (e) {
+    el.textContent = "Cookie：无法读取";
+  }
+}
+
+$("cookie-file").onchange = async () => {
+  const f = $("cookie-file").files?.[0];
+  if (!f) return;
+  $("ingest-error").textContent = "";
+  try {
+    const fd = new FormData();
+    fd.append("file", f, f.name);
+    const resp = await fetch("/api/cookies/upload", { method: "POST", body: fd });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+    await refreshCookieStatus();
+  } catch (e) {
+    $("ingest-error").textContent = e.message;
+  } finally {
+    $("cookie-file").value = "";
+  }
+};
+
+$("btn-cookie-clear").onclick = async () => {
+  if (!confirm("清除已保存的登录 Cookie？")) return;
+  try {
+    await api("/api/cookies", { method: "DELETE" });
+    await refreshCookieStatus();
+  } catch (e) {
+    $("ingest-error").textContent = e.message;
+  }
+};
 (() => {
   const dz = $("dropzone");
   const prevent = (e) => { e.preventDefault(); e.stopPropagation(); };
@@ -1584,11 +2102,17 @@ $("ingest-file").onchange = () => {
   dz.addEventListener("dragleave", () => dz.classList.remove("drag"));
   dz.addEventListener("drop", (e) => {
     dz.classList.remove("drag");
-    const f = e.dataTransfer?.files?.[0];
-    if (f) startIngestUpload(f);
+    const files = [...(e.dataTransfer?.files || [])];
+    if (!files.length) return;
+    const docs = files.filter((f) => isDocFileName(f.name));
+    if (docs.length) startDocsUpload(docs);
+    else startIngestUpload(files[0]);
   });
   dz.onclick = () => $("ingest-file").click();
 })();
+$("docs-folder").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") startDocsFolder();
+});
 $("search-q").addEventListener("keydown", (e) => { if (e.key === "Enter") runSearch(); });
 $("series-q").addEventListener("keydown", (e) => { if (e.key === "Enter") askSeries(); });
 $("reader-regen").onclick = () => {
@@ -1603,14 +2127,26 @@ $("question").addEventListener("keydown", (e) => {
 
 /** 标签页切换。三个面板统一处理，避免每加一个 tab 就要改两处、漏一处。 */
 function showTab(name) {
-  for (const t of ["ask", "notes", "usage"]) {
+  for (const t of ["ask", "notes", "quiz", "usage"]) {
     $(`tab-${t}`).classList.toggle("on", t === name);
     $(`panel-${t}`).classList.toggle("hidden", t !== name);
   }
-  if (name === "usage") loadUsage();   // 每次进入都重新取，数字要是新的
+  if (name === "usage") loadUsage();
+  if (name === "quiz" && !currentQuiz) {
+    $("quiz-status").textContent = currentId
+      ? "点「出题」根据本课材料生成选择题。"
+      : "请先在左侧选择一门课程。";
+  }
 }
 $("tab-ask").onclick = () => showTab("ask");
-$("tab-notes").onclick = () => showTab("notes");
+$("tab-notes").onclick = () => {
+  if (isDocumentCourse()) {
+    showTab("ask");
+    return;
+  }
+  showTab("notes");
+};
+$("tab-quiz").onclick = () => showTab("quiz");
 $("tab-usage").onclick = () => showTab("usage");
 
 /** 下载当前 notes.md。 */
@@ -1726,6 +2262,8 @@ bindSplitter($("split-ai"), "ai");
 
 loadHealth();
 loadLibrary();
+refreshCookieStatus();
+resumeRunningJobs();
 setInterval(loadHealth, 30000);
 </script>
 </body>

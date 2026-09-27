@@ -135,6 +135,20 @@ def explain_ollama_failure(status_code: int, body: str, base_url: str) -> str:
     )
 
 
+def _ollama_client(**kwargs) -> "httpx.Client":
+    """访问本机 Ollama 必须绕过系统代理。
+
+    Windows 开了系统代理时，httpx 默认 ``trust_env=True`` 会把
+    ``127.0.0.1:11434`` 也送进代理；代理对 loopback 直接掐连接，
+    表现就是 ``RemoteProtocolError: Server disconnected``——
+    而此时 ``curl`` / 托盘里的 Ollama 都显示正常，极易误判成「没开」。
+    """
+    import httpx
+
+    kwargs.setdefault("trust_env", False)
+    return httpx.Client(**kwargs)
+
+
 class OllamaEmbedder:
     """通过 Ollama 的 HTTP 接口做嵌入，复用机器上已有的 GGUF 模型。
 
@@ -180,14 +194,12 @@ class OllamaEmbedder:
         刻意用短超时：本机没跑 Ollama 是常态，不能因此卡住启动。
         """
         try:
-            import httpx
+            with _ollama_client(timeout=self.probe_timeout) as client:
+                resp = client.get(f"{self.base_url}/api/tags")
+                resp.raise_for_status()
         except ImportError:  # pragma: no cover
             self._reason = "未安装 httpx"
             return
-
-        try:
-            resp = httpx.get(f"{self.base_url}/api/tags", timeout=self.probe_timeout)
-            resp.raise_for_status()
         except Exception as exc:  # noqa: BLE001
             self._reason = f"Ollama 未响应（{self.base_url}）：{type(exc).__name__}"
             log.info("Ollama 嵌入不可用：%s", self._reason)
@@ -219,11 +231,9 @@ class OllamaEmbedder:
         if not self.available:
             raise RuntimeError(f"Ollama 嵌入不可用：{self._reason}")
 
-        import httpx
-
         size = batch_size or self.batch_size
         chunks: list[np.ndarray] = []
-        with httpx.Client(timeout=self.timeout) as client:
+        with _ollama_client(timeout=self.timeout) as client:
             for i in range(0, len(texts), size):
                 batch = [t or " " for t in texts[i : i + size]]
                 resp = client.post(

@@ -47,6 +47,13 @@ class VideoStatus(str, Enum):
         }[self.value]
 
 
+class ContentKind(str, Enum):
+    """一门课的介质类型：视频走 ASR/播放器；文档走原文阅读。"""
+
+    VIDEO = "video"
+    DOCUMENT = "document"
+
+
 @dataclass
 class Video:
     video_id: str
@@ -57,10 +64,12 @@ class Video:
     size_bytes: int = 0
     proxy_path: str | None = None
     error: str | None = None
+    kind: ContentKind = ContentKind.VIDEO
 
     def to_row(self) -> dict:
         d = asdict(self)
         d["status"] = self.status.value
+        d["kind"] = self.kind.value
         return d
 
 

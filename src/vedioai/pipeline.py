@@ -31,10 +31,11 @@ from .ingest.media import (
     probe,
     slice_audio,
 )
+from .ingest.document import is_document_path, load_document_text, parse_document
 from .ingest.segment import attach_parents, build_chapters, build_chunks
 from .ingest.slides import detect_slides, reocr_slides
 from .llm.client import LLMClient
-from .schema import Chapter, Chunk, Segment, Video, VideoStatus
+from .schema import Chapter, Chunk, ContentKind, Segment, Video, VideoStatus
 from .store import Store
 from .summarize import build_summary_tree
 
@@ -338,6 +339,8 @@ class IngestPipeline:
         reuse_slides: bool = True,
         skip_summary: bool = False,
         progress=None,
+        title: str | None = None,
+        video_id: str | None = None,
     ) -> Video:
         video_path = Path(video_path).resolve()
         if not video_path.exists():
@@ -348,9 +351,10 @@ class IngestPipeline:
             if progress:
                 progress(Progress(stage.value, done, total, message or stage.label))
 
-        video_id = video_id_for(video_path)
+        video_id = (video_id or "").strip() or video_id_for(video_path)
         work_dir = self.cfg.library_dir / video_id
         work_dir.mkdir(parents=True, exist_ok=True)
+        display_title = (title or "").strip() or video_path.stem
 
         try:
             # ---------------------------------------------------- 1. 探测
@@ -359,10 +363,11 @@ class IngestPipeline:
             video = Video(
                 video_id=video_id,
                 path=str(video_path),
-                title=video_path.stem,
+                title=display_title,
                 duration_ms=info.duration_ms,
                 status=VideoStatus.PROBING,
                 size_bytes=video_path.stat().st_size,
+                kind=ContentKind.VIDEO,
             )
             self.store.upsert_video(video)
 
@@ -525,6 +530,111 @@ class IngestPipeline:
 
         except Exception as exc:  # noqa: BLE001
             log.exception("入库失败")
+            self.store.set_status(video_id, VideoStatus.FAILED, error=str(exc))
+            if progress:
+                progress(Progress(VideoStatus.FAILED.value, 0, 1, f"入库失败：{exc}"))
+            raise
+
+    def run_document(
+        self,
+        doc_path: Path | str,
+        *,
+        skip_summary: bool = False,
+        progress=None,
+        title: str | None = None,
+        video_id: str | None = None,
+    ) -> Video:
+        """文档课程入库：解析切分 → 轻量摘要 → 向量。不跑 ASR / 代理 / 笔记。"""
+        doc_path = Path(doc_path).resolve()
+        if not doc_path.exists():
+            raise FileNotFoundError(f"文档不存在：{doc_path}")
+        if not is_document_path(doc_path):
+            raise ValueError(f"不支持的文档格式：{doc_path.suffix}（支持 .md / .txt / .markdown）")
+
+        def report(stage: VideoStatus, done=0, total=0, message=""):
+            self.store.set_status(video_id, stage)
+            if progress:
+                progress(Progress(stage.value, done, total, message or stage.label))
+
+        video_id = (video_id or "").strip() or video_id_for(doc_path)
+        work_dir = self.cfg.library_dir / video_id
+        work_dir.mkdir(parents=True, exist_ok=True)
+        display_title = (title or "").strip() or doc_path.stem
+
+        video = Video(
+            video_id=video_id,
+            path=str(doc_path),
+            title=display_title,
+            duration_ms=0,
+            status=VideoStatus.PENDING,
+            size_bytes=doc_path.stat().st_size if doc_path.exists() else 0,
+            proxy_path=None,
+            kind=ContentKind.DOCUMENT,
+        )
+        self.store.upsert_video(video)
+
+        try:
+            report(VideoStatus.SEGMENT, 0, 1, "解析文档")
+            text = load_document_text(doc_path)
+            parsed = parse_document(text, video_id, title=display_title)
+
+            # 原文落盘，供阅读区渲染（不生成视频风格 notes.md）
+            source_path = work_dir / "source.md"
+            source_path.write_text(parsed.text, encoding="utf-8", newline="\n")
+
+            video.title = parsed.title
+            video.duration_ms = parsed.duration_ms
+            video.status = VideoStatus.SEGMENT
+            video.size_bytes = doc_path.stat().st_size
+            self.store.upsert_video(video)
+
+            # 文档课无转写 / 课件
+            self.store.replace_segments(video_id, [])
+            self.store.replace_slides(video_id, [])
+
+            chunks = parsed.chunks
+            chapters = parsed.chapters
+            self._carry_over_summaries(video_id, chunks, chapters)
+            self.store.replace_chunks(video_id, chunks)
+            self.store.replace_chapters(video_id, chapters)
+            log.info("文档分段：%d 块，%d 章", len(chunks), len(chapters))
+
+            summary_note = ""
+            if self.llm is not None and not skip_summary:
+                report(VideoStatus.SUMMARY, 0, len(chunks), "生成分层摘要")
+                result = build_summary_tree(
+                    self.llm,
+                    self.store,
+                    video,
+                    chunks,
+                    chapters,
+                    progress=lambda d, t, m: report(VideoStatus.SUMMARY, d, t, m),
+                )
+                if result.video_title:
+                    video.title = result.video_title[:80]
+                self._write_concepts(video_id, result)
+                if result.degraded:
+                    summary_note = result.describe()
+                    log.warning(summary_note)
+
+            if self.embedder is not None and self.embedder.available:
+                report(VideoStatus.EMBED, 0, len(chunks), "建立向量索引")
+                texts = [c.combined_text for c in chunks]
+                vecs = self.embedder.encode(texts)
+                self.store.upsert_embeddings(
+                    video_id, zip([c.chunk_id for c in chunks], vecs, strict=False)
+                )
+
+            video.error = summary_note or None
+            video.status = VideoStatus.READY
+            self.store.upsert_video(video)
+            if progress:
+                message = "入库完成" if not summary_note else "入库完成（摘要部分降级）"
+                progress(Progress(VideoStatus.READY.value, 1, 1, message))
+            return video
+
+        except Exception as exc:  # noqa: BLE001
+            log.exception("文档入库失败")
             self.store.set_status(video_id, VideoStatus.FAILED, error=str(exc))
             if progress:
                 progress(Progress(VideoStatus.FAILED.value, 0, 1, f"入库失败：{exc}"))

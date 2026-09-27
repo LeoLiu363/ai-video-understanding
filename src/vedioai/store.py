@@ -20,11 +20,11 @@ from pathlib import Path
 import jieba
 import numpy as np
 
-from .schema import Chapter, Chunk, Segment, Slide, Video, VideoStatus
+from .schema import Chapter, Chunk, ContentKind, Segment, Slide, Video, VideoStatus
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS videos (
     proxy_path   TEXT,
     error        TEXT,
     video_summary TEXT NOT NULL DEFAULT '',
+    kind         TEXT NOT NULL DEFAULT 'video',
     created_at   TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -174,6 +175,16 @@ CREATE TABLE IF NOT EXISTS course_labels (
 
 CREATE INDEX IF NOT EXISTS idx_session_video ON chat_sessions(video_id, updated_at);
 CREATE INDEX IF NOT EXISTS idx_msg_session   ON chat_messages(session_id, id);
+
+-- 课内测验卷（含答案）；发给前端作答前会剥掉 answer/explanation。
+CREATE TABLE IF NOT EXISTS quizzes (
+    quiz_id         TEXT PRIMARY KEY,
+    video_id        TEXT NOT NULL,
+    question_count  INTEGER NOT NULL DEFAULT 0,
+    payload         TEXT NOT NULL,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_quiz_video ON quizzes(video_id, created_at);
 """
 
 
@@ -248,6 +259,7 @@ class Store:
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
         self.conn.executescript(_SCHEMA)
+        self._migrate()
         self.conn.execute(
             "INSERT INTO meta(key, value) VALUES('schema_version', ?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -255,15 +267,23 @@ class Store:
         )
         self.conn.commit()
 
+    def _migrate(self) -> None:
+        """增量补列：CREATE TABLE IF NOT EXISTS 不会给旧表加新字段。"""
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(videos)").fetchall()}
+        if "kind" not in cols:
+            self.conn.execute(
+                "ALTER TABLE videos ADD COLUMN kind TEXT NOT NULL DEFAULT 'video'"
+            )
+
     # ------------------------------------------------------------------ 视频
 
     def upsert_video(self, video: Video) -> None:
         self.conn.execute(
             """
             INSERT INTO videos (video_id, path, title, duration_ms, status,
-                                size_bytes, proxy_path, error)
+                                size_bytes, proxy_path, error, kind)
             VALUES (:video_id, :path, :title, :duration_ms, :status,
-                    :size_bytes, :proxy_path, :error)
+                    :size_bytes, :proxy_path, :error, :kind)
             ON CONFLICT(video_id) DO UPDATE SET
                 path=excluded.path,
                 title=excluded.title,
@@ -272,6 +292,7 @@ class Store:
                 size_bytes=excluded.size_bytes,
                 proxy_path=excluded.proxy_path,
                 error=excluded.error,
+                kind=excluded.kind,
                 updated_at=datetime('now')
             """,
             video.to_row(),
@@ -321,6 +342,11 @@ class Store:
         row = self.conn.execute("SELECT * FROM videos WHERE video_id=?", (video_id,)).fetchone()
         if not row:
             return None
+        kind_raw = row["kind"] if "kind" in row.keys() else "video"
+        try:
+            kind = ContentKind(kind_raw or "video")
+        except ValueError:
+            kind = ContentKind.VIDEO
         return Video(
             video_id=row["video_id"],
             path=row["path"],
@@ -330,6 +356,7 @@ class Store:
             size_bytes=row["size_bytes"],
             proxy_path=row["proxy_path"],
             error=row["error"],
+            kind=kind,
         )
 
     def get_video_summary(self, video_id: str) -> str:
@@ -349,7 +376,14 @@ class Store:
             ORDER BY v.updated_at DESC
             """
         ).fetchall()
-        return [dict(r) for r in rows]
+        items = []
+        for r in rows:
+            d = dict(r)
+            # 旧库或异常行：列表 API 始终带 kind，供前端区分视频/文档
+            if not d.get("kind"):
+                d["kind"] = "video"
+            items.append(d)
+        return items
 
     def find_by_path(self, path: str) -> Video | None:
         row = self.conn.execute("SELECT video_id FROM videos WHERE path=?", (path,)).fetchone()
@@ -1083,6 +1117,50 @@ class Store:
                 (session_id, limit),
             ).fetchall()
         return [_message_row(r) for r in rows]
+
+    # ------------------------------------------------------------------ 测验
+
+    def save_quiz(self, quiz_id: str, video_id: str, payload: dict) -> None:
+        questions = payload.get("questions") or []
+        self.conn.execute(
+            """
+            INSERT INTO quizzes (quiz_id, video_id, question_count, payload)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(quiz_id) DO UPDATE SET
+                video_id=excluded.video_id,
+                question_count=excluded.question_count,
+                payload=excluded.payload
+            """,
+            (
+                quiz_id,
+                video_id,
+                len(questions),
+                json.dumps(payload, ensure_ascii=False),
+            ),
+        )
+        self.conn.commit()
+
+    def get_quiz(self, quiz_id: str) -> dict | None:
+        row = self.conn.execute(
+            "SELECT payload FROM quizzes WHERE quiz_id=?", (quiz_id,)
+        ).fetchone()
+        if not row:
+            return None
+        try:
+            return json.loads(row["payload"])
+        except json.JSONDecodeError:
+            return None
+
+    def list_quizzes(self, video_id: str, *, limit: int = 10) -> list[dict]:
+        rows = self.conn.execute(
+            """
+            SELECT quiz_id, video_id, question_count, created_at
+            FROM quizzes WHERE video_id=?
+            ORDER BY created_at DESC LIMIT ?
+            """,
+            (video_id, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     def close(self) -> None:
         self.conn.close()

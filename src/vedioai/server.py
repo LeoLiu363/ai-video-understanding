@@ -27,11 +27,23 @@ from .embedding import Embedder, Reranker, build_embedder
 from . import ledger
 from .glossary import append_course_correction
 from .ingest.asr_volc import VolcASRClient
+from .ingest.download import (
+    clear_cookies,
+    cookie_status,
+    download_video,
+    looks_like_url,
+    normalize_url,
+    save_cookies,
+    source_id_for_url,
+    ytdlp_available,
+)
 from .jobs import JobRegistry
 from .llm.client import LLMClient, from_llm_config
 from .notes import NotesService
+from .ingest.document import DOC_EXTENSIONS, is_document_path, list_document_files
 from .pipeline import IngestPipeline, repair_videos, video_id_for
-from .schema import ms_to_hms
+from .quiz import generate_quiz, grade_quiz, public_quiz
+from .schema import ContentKind, ms_to_hms
 from .series import (
     annotate_library_items,
     build_series_prefix,
@@ -48,9 +60,25 @@ _RANGE_RE = re.compile(r"bytes=(\d*)-(\d*)")
 
 
 class IngestRequest(BaseModel):
-    path: str
+    # path 与 url 二选一；都给时优先 url
+    path: str = ""
+    url: str = ""
     skip_summary: bool = False
     no_slides: bool = False
+
+
+class DocsIngestRequest(BaseModel):
+    """批量文档入库：paths 与 folder 可同时给，去重后排队。"""
+
+    paths: list[str] = []
+    folder: str = ""
+    skip_summary: bool = False
+
+
+class CookieImportRequest(BaseModel):
+    """粘贴 Netscape cookies.txt 全文。"""
+
+    content: str
 
 
 class AskRequest(BaseModel):
@@ -87,6 +115,19 @@ class SessionUpdateRequest(BaseModel):
 
 class NotesRequest(BaseModel):
     video_id: str
+
+
+class SummarizeRequest(BaseModel):
+    video_id: str
+
+
+class QuizGenerateRequest(BaseModel):
+    video_id: str
+    count: int = 8
+
+
+class QuizSubmitRequest(BaseModel):
+    answers: dict[str, str]
 
 
 def create_app(cfg: Config | None = None) -> FastAPI:
@@ -137,9 +178,11 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             # 列表 UI 一个字都用不到（只用标题/时长/章数/状态）。以前每门课都
             # 白传一遍，课程一多就是纯浪费。
             v.pop("video_summary", None)
+            kind = v.get("kind") or "video"
             items.append(
                 {
                     **v,
+                    "kind": kind,
                     "duration_label": ms_to_hms(v["duration_ms"]),
                 }
             )
@@ -153,7 +196,11 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             raise HTTPException(404, "课程不存在")
         chapters = store.get_chapters(video_id)
         return {
-            "video": {**video.to_row(), "duration_label": ms_to_hms(video.duration_ms)},
+            "video": {
+                **video.to_row(),
+                "kind": video.kind.value,
+                "duration_label": ms_to_hms(video.duration_ms),
+            },
             # 剥掉摘要自带的「大纲：」列表：下面 chapters 字段已经列了同一批章节
             "summary": summary_without_outline(store.get_video_summary(video_id) or ""),
 
@@ -193,13 +240,20 @@ def create_app(cfg: Config | None = None) -> FastAPI:
 
     # ------------------------------------------------------------------ 入库
 
-    def _start_ingest_job(path: Path, *, skip_summary: bool = False, no_slides: bool = False) -> dict:
+    def _start_ingest_job(
+        path: Path,
+        *,
+        skip_summary: bool = False,
+        no_slides: bool = False,
+        title: str | None = None,
+        video_id: str | None = None,
+    ) -> dict:
         if not path.exists():
             raise HTTPException(400, f"文件不存在：{path}")
-        video_id = video_id_for(path)
-        running = jobs.find_running("ingest", video_id)
+        vid = (video_id or "").strip() or video_id_for(path)
+        running = jobs.find_running("ingest", vid)
         if running:
-            return {"job_id": running.job_id, "video_id": video_id, "reused": True}
+            return {"job_id": running.job_id, "video_id": vid, "reused": True}
 
         if no_slides:
             cfg.slides.enabled = False
@@ -210,7 +264,11 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             pipeline = IngestPipeline(cfg, store, llm=llm, embedder=embedder, asr=asr)
             try:
                 video = pipeline.run(
-                    path, skip_summary=skip_summary, progress=on_progress
+                    path,
+                    skip_summary=skip_summary,
+                    progress=on_progress,
+                    title=title,
+                    video_id=vid,
                 )
                 if llm is not None:
                     AskService(
@@ -221,13 +279,145 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             finally:
                 asr.close()
 
-        job = jobs.submit("ingest", video_id, work)
-        return {"job_id": job.job_id, "video_id": video_id}
+        job = jobs.submit("ingest", vid, work)
+        return {"job_id": job.job_id, "video_id": vid}
+
+    def _start_doc_ingest_job(
+        path: Path,
+        *,
+        skip_summary: bool = False,
+        title: str | None = None,
+        video_id: str | None = None,
+    ) -> dict:
+        if not path.exists():
+            raise HTTPException(400, f"文件不存在：{path}")
+        if not is_document_path(path):
+            raise HTTPException(
+                400,
+                f"不支持的文档格式：{path.suffix}（支持 {', '.join(sorted(DOC_EXTENSIONS))}）",
+            )
+        vid = (video_id or "").strip() or video_id_for(path)
+        running = jobs.find_running("ingest", vid)
+        if running:
+            return {"job_id": running.job_id, "video_id": vid, "reused": True}
+
+        def work(on_progress) -> dict:
+            llm = None if skip_summary else make_llm()
+            pipeline = IngestPipeline(cfg, store, llm=llm, embedder=embedder, asr=None)
+            video = pipeline.run_document(
+                path,
+                skip_summary=skip_summary,
+                progress=on_progress,
+                title=title,
+                video_id=vid,
+            )
+            if llm is not None:
+                AskService(
+                    cfg, store, llm, make_vision(),
+                    embedder=embedder, reranker=reranker,
+                ).warm(video.video_id)
+            return {"video_id": video.video_id, "title": video.title, "kind": "document"}
+
+        job = jobs.submit("ingest", vid, work)
+        return {"job_id": job.job_id, "video_id": vid}
+
+    def _start_url_ingest_job(
+        url: str, *, skip_summary: bool = False, no_slides: bool = False
+    ) -> dict:
+        if not ytdlp_available():
+            raise HTTPException(400, "未安装 yt-dlp：pip install yt-dlp")
+        try:
+            url = normalize_url(url)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
+        vid = source_id_for_url(url)
+        running = jobs.find_running("ingest", vid)
+        if running:
+            return {"job_id": running.job_id, "video_id": vid, "reused": True}
+
+        if no_slides:
+            cfg.slides.enabled = False
+
+        from .pipeline import Progress
+
+        def work(on_progress) -> dict:
+            cookies = None
+            status = cookie_status(cfg.data_dir)
+            if status["present"]:
+                from .ingest.download import cookies_file
+
+                cookies = cookies_file(cfg.data_dir)
+
+            def on_dl(pct: float, message: str) -> None:
+                # 拉取阶段占任务前 20%，避免后面入库进度从 0 跳回
+                on_progress(
+                    Progress("download", done=int(pct * 0.2), total=100, message=message)
+                )
+
+            result = download_video(
+                url,
+                cfg.downloads_dir / vid,
+                cookies=cookies,
+                ffmpeg=cfg.media.ffmpeg,
+                progress=on_dl,
+            )
+
+            def on_ingest(p: Progress) -> None:
+                # 入库阶段映射到 20%–100%
+                mapped = 20.0 + p.percent * 0.8
+                on_progress(
+                    Progress(
+                        p.stage,
+                        done=int(mapped),
+                        total=100,
+                        message=p.message or p.stage,
+                    )
+                )
+
+            asr = VolcASRClient(cfg.asr)
+            llm = None if skip_summary else make_llm()
+            pipeline = IngestPipeline(cfg, store, llm=llm, embedder=embedder, asr=asr)
+            try:
+                video = pipeline.run(
+                    result.path,
+                    skip_summary=skip_summary,
+                    progress=on_ingest,
+                    title=result.title,
+                    video_id=vid,
+                )
+                if llm is not None:
+                    AskService(
+                        cfg, store, llm, make_vision(),
+                        embedder=embedder, reranker=reranker,
+                    ).warm(video.video_id)
+                return {
+                    "video_id": video.video_id,
+                    "title": video.title,
+                    "source_url": result.url,
+                    "extractor": result.extractor,
+                }
+            finally:
+                asr.close()
+
+        job = jobs.submit("ingest", vid, work)
+        return {"job_id": job.job_id, "video_id": vid}
 
     @app.post("/api/ingest")
     def ingest(req: IngestRequest) -> dict:
+        raw = (req.url or req.path or "").strip()
+        if not raw:
+            raise HTTPException(400, "请提供 path 或 url")
+        # 兼容：path 字段里粘了链接
+        if req.url or looks_like_url(raw):
+            return _start_url_ingest_job(
+                req.url or raw,
+                skip_summary=req.skip_summary,
+                no_slides=req.no_slides,
+            )
         return _start_ingest_job(
-            Path(req.path), skip_summary=req.skip_summary, no_slides=req.no_slides
+            Path(req.path or raw),
+            skip_summary=req.skip_summary,
+            no_slides=req.no_slides,
         )
 
     @app.post("/api/ingest/upload")
@@ -248,6 +438,123 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         finally:
             await file.close()
         return _start_ingest_job(dest)
+
+    @app.post("/api/ingest/docs")
+    def ingest_docs(req: DocsIngestRequest) -> dict:
+        """批量文档入库：本地路径列表和/或文件夹，返回 job_ids。"""
+        paths = list_document_files(
+            paths=[Path(p) for p in (req.paths or []) if str(p).strip()],
+            folder=Path(req.folder) if (req.folder or "").strip() else None,
+        )
+        if not paths:
+            raise HTTPException(400, "未找到可导入的 .md / .txt / .markdown 文件")
+        jobs_out = []
+        for p in paths:
+            jobs_out.append(
+                _start_doc_ingest_job(p, skip_summary=req.skip_summary)
+            )
+        return {
+            "job_ids": [j["job_id"] for j in jobs_out],
+            "jobs": jobs_out,
+            "count": len(jobs_out),
+        }
+
+    @app.post("/api/ingest/docs/upload")
+    async def ingest_docs_upload(files: list[UploadFile] = File(...)) -> dict:
+        """浏览器多选 / 多文件拖拽文档入库。"""
+        if not files:
+            raise HTTPException(400, "请选择至少一个文档")
+        inbox = cfg.data_dir / "inbox"
+        inbox.mkdir(parents=True, exist_ok=True)
+        jobs_out = []
+        for file in files:
+            name = Path(file.filename or "upload.txt").name
+            if not name or name in (".", ".."):
+                await file.close()
+                continue
+            if not is_document_path(Path(name)):
+                await file.close()
+                raise HTTPException(
+                    400,
+                    f"不支持的文档格式：{Path(name).suffix}（支持 {', '.join(sorted(DOC_EXTENSIONS))}）",
+                )
+            dest = inbox / name
+            if dest.exists():
+                dest = inbox / f"{dest.stem}-{datetime.now().strftime('%H%M%S')}{dest.suffix}"
+            try:
+                with dest.open("wb") as out:
+                    shutil.copyfileobj(file.file, out)
+            finally:
+                await file.close()
+            jobs_out.append(_start_doc_ingest_job(dest, title=Path(name).stem))
+        if not jobs_out:
+            raise HTTPException(400, "没有有效的文档文件")
+        return {
+            "job_ids": [j["job_id"] for j in jobs_out],
+            "jobs": jobs_out,
+            "count": len(jobs_out),
+        }
+
+    @app.get("/api/library/{video_id}/document")
+    def library_document(video_id: str) -> dict:
+        """文档课原文（阅读区用）。视频课返回 404。"""
+        video = store.get_video(video_id)
+        if video is None:
+            raise HTTPException(404, "课程不存在")
+        if video.kind != ContentKind.DOCUMENT:
+            raise HTTPException(404, "该课程不是文档课")
+        source = cfg.library_dir / video_id / "source.md"
+        if source.exists():
+            text = source.read_text(encoding="utf-8")
+        else:
+            # 兼容：若未落盘则回读源路径
+            try:
+                from .ingest.document import load_document_text
+
+                text = load_document_text(Path(video.path))
+            except OSError as exc:
+                raise HTTPException(404, f"原文不可用：{exc}") from None
+        return {
+            "video_id": video_id,
+            "title": video.title,
+            "markdown": text,
+            "format": "markdown",
+        }
+
+    @app.get("/api/cookies")
+    def cookies_get() -> dict:
+        """Cookie 状态（不含内容）。用于 B 站等需登录的站点。"""
+        st = cookie_status(cfg.data_dir)
+        st["hint"] = (
+            "用浏览器扩展导出 Netscape cookies.txt（如 Get cookies.txt LOCALLY），"
+            "仅用于你有权观看的内容。"
+        )
+        return st
+
+    @app.post("/api/cookies/upload")
+    async def cookies_upload(file: UploadFile = File(...)) -> dict:
+        """上传 Netscape cookies.txt。"""
+        try:
+            raw = await file.read()
+        finally:
+            await file.close()
+        try:
+            return save_cookies(cfg.data_dir, raw)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
+
+    @app.put("/api/cookies")
+    def cookies_put(req: CookieImportRequest) -> dict:
+        """粘贴 cookies.txt 全文。"""
+        try:
+            return save_cookies(cfg.data_dir, req.content)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
+
+    @app.delete("/api/cookies")
+    def cookies_delete() -> dict:
+        clear_cookies(cfg.data_dir)
+        return {"ok": True, **cookie_status(cfg.data_dir)}
 
     @app.get("/api/jobs/{job_id}")
     def job_status(job_id: str) -> dict:
@@ -514,6 +821,11 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         if not cfg.llm.api_key:
             raise HTTPException(400, "未配置 DEEPSEEK_API_KEY")
         video_id = req.video_id
+        video = store.get_video(video_id)
+        if video is None:
+            raise HTTPException(404, "课程不存在")
+        if video.kind == ContentKind.DOCUMENT:
+            raise HTTPException(400, "文档课以原文为教材，无需生成学习文档")
 
         running = jobs.find_running("notes", video_id)
         if running:
@@ -533,6 +845,103 @@ def create_app(cfg: Config | None = None) -> FastAPI:
 
         job = jobs.submit("notes", video_id, work)
         return {"job_id": job.job_id}
+
+    @app.post("/api/summarize")
+    def summarize(req: SummarizeRequest) -> dict:
+        """只重跑分层摘要（补章节标题），不重新转写。"""
+        if not cfg.llm.api_key:
+            raise HTTPException(400, "未配置 DEEPSEEK_API_KEY")
+        video_id = req.video_id
+        video = store.get_video(video_id)
+        if video is None:
+            raise HTTPException(404, "课程不存在")
+        running = jobs.find_running("summarize", video_id)
+        if running:
+            return {"job_id": running.job_id, "reused": True}
+
+        from .pipeline import Progress
+        from .schema import VideoStatus
+        from .summarize import build_summary_tree
+
+        def work(on_progress) -> dict:
+            llm = make_llm()
+            try:
+                chunks = store.get_chunks(video_id)
+                chapters = store.get_chapters(video_id)
+                if not chunks or not chapters:
+                    raise RuntimeError("没有分段数据，无法摘要")
+                store.set_status(video_id, VideoStatus.SUMMARY)
+
+                def prog(done, total, message=""):
+                    on_progress(Progress("summary", done, total, message))
+
+                result = build_summary_tree(
+                    llm, store, video, chunks, chapters, progress=prog
+                )
+                v = store.get_video(video_id)
+                if v is None:
+                    raise RuntimeError("课程在摘要过程中被删除")
+                if result.video_title:
+                    v.title = result.video_title[:80]
+                v.error = result.describe() if result.degraded else None
+                v.status = VideoStatus.READY
+                store.upsert_video(v)
+                if embedder.available:
+                    fresh = store.get_chunks(video_id)
+                    vecs = embedder.encode([c.combined_text for c in fresh])
+                    store.upsert_embeddings(
+                        video_id,
+                        zip([c.chunk_id for c in fresh], vecs, strict=False),
+                    )
+                return {
+                    "video_id": video_id,
+                    "degraded": result.degraded,
+                    "note": result.describe() if result.degraded else "",
+                    "chapters": len(chapters),
+                }
+            finally:
+                llm.close()
+
+        job = jobs.submit("summarize", video_id, work)
+        return {"job_id": job.job_id}
+
+    @app.post("/api/quiz")
+    def quiz_create(req: QuizGenerateRequest) -> dict:
+        """为当前课程生成一套选择题（不含答案，答案在提交后揭晓）。"""
+        if not cfg.llm.api_key:
+            raise HTTPException(400, "未配置 DEEPSEEK_API_KEY")
+        if store.get_video(req.video_id) is None:
+            raise HTTPException(404, "课程不存在")
+        llm = make_llm()
+        try:
+            payload = generate_quiz(llm, store, req.video_id, count=req.count)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(500, f"出题失败：{exc}") from None
+        finally:
+            llm.close()
+        return public_quiz(payload)
+
+    @app.get("/api/quiz/{quiz_id}")
+    def quiz_get(quiz_id: str) -> dict:
+        payload = store.get_quiz(quiz_id)
+        if payload is None:
+            raise HTTPException(404, "测验不存在")
+        return public_quiz(payload)
+
+    @app.post("/api/quiz/{quiz_id}/submit")
+    def quiz_submit(quiz_id: str, req: QuizSubmitRequest) -> dict:
+        payload = store.get_quiz(quiz_id)
+        if payload is None:
+            raise HTTPException(404, "测验不存在")
+        return grade_quiz(payload, req.answers)
+
+    @app.get("/api/quizzes")
+    def quiz_list(video_id: str) -> dict:
+        if store.get_video(video_id) is None:
+            raise HTTPException(404, "课程不存在")
+        return {"items": store.list_quizzes(video_id)}
 
     @app.get("/api/notes/{video_id}")
     def notes_document(video_id: str) -> dict:
@@ -624,6 +1033,8 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             "vision_ready": bool(cfg.vision.api_key),
             "embedder": embedder.available,
             "reranker": reranker.available,
+            "ytdlp": ytdlp_available(),
+            "cookies": cookie_status(cfg.data_dir)["present"],
         }
 
     return app

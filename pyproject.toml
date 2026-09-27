@@ -17,6 +17,7 @@ dependencies = [
     "numpy>=1.26",
     "Pillow>=10.4",
     "python-multipart>=0.0.9",
+    "yt-dlp>=2024.8.0",
 ]
 
 [project.optional-dependencies]

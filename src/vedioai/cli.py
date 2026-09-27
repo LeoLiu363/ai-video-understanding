@@ -3,6 +3,7 @@
 用法示例：
     vedioai check                       # 检查凭证与依赖
     vedioai ingest "D:\\courses\\lesson1.mp4"
+    vedioai ingest-docs --folder "D:\\notes"
     vedioai list
     vedioai ask <video_id> "老师说的三种排序分别是什么"
     vedioai notes <video_id>
@@ -133,6 +134,16 @@ def cmd_check(args, cfg) -> int:
     except ImportError:
         print("RapidOCR      : 未安装（课件 OCR 将跳过）pip install rapidocr-onnxruntime")
 
+    # yt-dlp / Cookie
+    from .ingest.download import cookie_status, ytdlp_available
+
+    print(f"yt-dlp        : {'OK' if ytdlp_available() else '未安装（URL 入库不可用）pip install yt-dlp'}")
+    st = cookie_status(cfg.data_dir)
+    if st["present"]:
+        print(f"登录 Cookie   : OK  {st['lines']} 条（{st['path']}）")
+    else:
+        print("登录 Cookie   : 未导入（B 站大会员等需登录内容时用 vedioai cookies import）")
+
     # 本地模型
     embedder = build_embedder(cfg)
     if embedder.available:
@@ -173,10 +184,54 @@ def cmd_check(args, cfg) -> int:
 def cmd_ingest(args, cfg) -> int:
     # 先校验文件，再要凭证：路径写错时给出的是「文件不存在」，
     # 而不是让人去查密钥，少一次无谓排查
-    video_path = Path(args.video)
-    if not video_path.exists():
-        print(f"错误：视频文件不存在：{video_path}", file=sys.stderr)
-        return 1
+    from .ingest.download import (
+        cookie_status,
+        cookies_file,
+        download_video,
+        looks_like_url,
+        ytdlp_available,
+    )
+
+    source = args.video
+    title_override = None
+    video_id_override = None
+    video_path: Path
+
+    if looks_like_url(source):
+        if not ytdlp_available():
+            print("错误：未安装 yt-dlp。pip install yt-dlp", file=sys.stderr)
+            return 1
+        from .ingest.download import source_id_for_url
+
+        vid = source_id_for_url(source)
+        cookies = cookies_file(cfg.data_dir) if cookie_status(cfg.data_dir)["present"] else None
+        print(f"拉取视频：{source}")
+        if cookies:
+            print(f"使用 Cookie：{cookies}")
+        else:
+            print("未配置 Cookie（公开内容通常够用；大会员/需登录时请先：vedioai cookies import <文件>）")
+
+        def on_dl(pct, message):
+            sys.stdout.write(f"\r  {message:<60}")
+            sys.stdout.flush()
+
+        result = download_video(
+            source,
+            cfg.downloads_dir / vid,
+            cookies=cookies,
+            ffmpeg=cfg.media.ffmpeg,
+            progress=on_dl,
+        )
+        sys.stdout.write("\n")
+        video_path = result.path
+        title_override = result.title
+        video_id_override = result.source_id
+        print(f"已下载：{result.title}")
+    else:
+        video_path = Path(source)
+        if not video_path.exists():
+            print(f"错误：视频文件不存在：{video_path}", file=sys.stderr)
+            return 1
 
     store = Store(cfg.db_path)
     asr, llm, _ = _make_clients(cfg, need_asr=True, need_llm=not args.no_summary, store=store)
@@ -199,6 +254,8 @@ def cmd_ingest(args, cfg) -> int:
         skip_summary=args.no_summary,
         reuse_slides=not args.refresh_slides,
         progress=on_progress,
+        title=title_override,
+        video_id=video_id_override,
     )
     sys.stdout.write("\n")
     print(f"完成：{video.title}")
@@ -209,17 +266,97 @@ def cmd_ingest(args, cfg) -> int:
     return 0
 
 
+def cmd_ingest_docs(args, cfg) -> int:
+    """批量导入 Markdown / 纯文本文档为课程（不生成视频笔记）。"""
+    from .ingest.document import list_document_files
+
+    paths = list_document_files(
+        paths=[Path(p) for p in (args.paths or [])],
+        folder=Path(args.folder) if args.folder else None,
+    )
+    if not paths:
+        print("错误：未找到可导入的 .md / .txt / .markdown 文件", file=sys.stderr)
+        return 1
+
+    store = Store(cfg.db_path)
+    _, llm, _ = _make_clients(cfg, need_asr=False, need_llm=not args.no_summary, store=store)
+    embedder = build_embedder(cfg)
+    pipeline = IngestPipeline(cfg, store, llm=llm, embedder=embedder, asr=None)
+
+    ok = 0
+    for i, doc_path in enumerate(paths, 1):
+        print(f"[{i}/{len(paths)}] {doc_path}")
+
+        def on_progress(p, _path=doc_path):
+            bar_total = 30
+            filled = int(p.percent / 100 * bar_total) if p.total else 0
+            bar = "█" * filled + "·" * (bar_total - filled)
+            sys.stdout.write(f"\r  [{bar}] {p.percent:5.1f}%  {p.message[:48]:<48}")
+            sys.stdout.flush()
+
+        try:
+            video = pipeline.run_document(
+                doc_path,
+                skip_summary=args.no_summary,
+                progress=on_progress,
+            )
+            sys.stdout.write("\n")
+            print(f"  完成：{video.title} ({video.video_id})")
+            ok += 1
+        except Exception as exc:  # noqa: BLE001
+            sys.stdout.write("\n")
+            print(f"  失败：{exc}", file=sys.stderr)
+
+    store.close()
+    print(f"合计 {ok}/{len(paths)} 门文档课入库成功")
+    return 0 if ok == len(paths) else 1
+
+
+def cmd_cookies(args, cfg) -> int:
+    from .ingest.download import clear_cookies, cookie_status, save_cookies
+
+    action = args.cookies_action
+    if action == "status":
+        st = cookie_status(cfg.data_dir)
+        if st["present"]:
+            print(f"已配置 Cookie：{st['path']}（{st['lines']} 条，{st['bytes']} 字节）")
+        else:
+            print("未配置 Cookie。")
+            print("用浏览器扩展导出 Netscape cookies.txt 后：")
+            print("  vedioai cookies import path\\to\\cookies.txt")
+        return 0
+    if action == "clear":
+        clear_cookies(cfg.data_dir)
+        print("已清除 Cookie。")
+        return 0
+    if action == "import":
+        path = Path(args.file)
+        if not path.exists():
+            print(f"错误：文件不存在：{path}", file=sys.stderr)
+            return 1
+        try:
+            st = save_cookies(cfg.data_dir, path.read_text(encoding="utf-8", errors="replace"))
+        except ValueError as exc:
+            print(f"错误：{exc}", file=sys.stderr)
+            return 1
+        print(f"已导入：{st['path']}（{st['lines']} 条）")
+        return 0
+    print(f"未知操作：{action}", file=sys.stderr)
+    return 1
+
+
 def cmd_list(args, cfg) -> int:
     store = Store(cfg.db_path)
     videos = store.list_videos()
     if not videos:
         print("课程库为空。用 `vedioai ingest <视频路径>` 入库。")
         return 0
-    print(f"{'video_id':<18} {'状态':<10} {'时长':>8} {'章':>4} {'块':>5} {'图':>5}  标题")
-    print("-" * 96)
+    print(f"{'video_id':<18} {'类型':<6} {'状态':<10} {'时长':>8} {'章':>4} {'块':>5} {'图':>5}  标题")
+    print("-" * 104)
     for v in videos:
+        kind = "文档" if (v.get("kind") or "video") == "document" else "视频"
         print(
-            f"{v['video_id']:<18} {v['status']:<10} {ms_to_hms(v['duration_ms']):>8} "
+            f"{v['video_id']:<18} {kind:<6} {v['status']:<10} {ms_to_hms(v['duration_ms']):>8} "
             f"{v['chapter_count']:>4} {v['chunk_count']:>5} {v['slide_count']:>5}  {v['title']}"
         )
     store.close()
@@ -236,6 +373,7 @@ def cmd_info(args, cfg) -> int:
 
     print(f"标题     : {video.title}")
     print(f"video_id : {video.video_id}")
+    print(f"类型     : {video.kind.value}")
     print(f"状态     : {video.status.label}")
     print(f"时长     : {ms_to_hms(video.duration_ms)}")
     print(f"路径     : {video.path}")
@@ -311,6 +449,56 @@ def cmd_notes(args, cfg) -> int:
     print(f"字数：{len(result.markdown)}")
     store.close()
     return 0
+
+
+def cmd_summarize(args, cfg) -> int:
+    """只重跑分层摘要（补章节标题），不重新转写 / OCR。"""
+    from .schema import VideoStatus
+    from .summarize import build_summary_tree
+
+    store = Store(cfg.db_path)
+    video_id = _resolve_video_id(store, args.video)
+    video = store.get_video(video_id)
+    assert video is not None
+    chunks = store.get_chunks(video_id)
+    chapters = store.get_chapters(video_id)
+    if not chunks or not chapters:
+        print("没有分段数据，无法摘要", file=sys.stderr)
+        store.close()
+        return 1
+    _, llm, _ = _make_clients(cfg, need_llm=True, store=store)
+    store.set_status(video_id, VideoStatus.SUMMARY)
+
+    def on_progress(done, total, message=""):
+        pct = (done / total * 100.0) if total else 0.0
+        sys.stdout.write(f"\r[{pct:5.1f}%] {message:<48}")
+        sys.stdout.flush()
+
+    print(f"补跑摘要：{video.title}（{len(chunks)} 块 / {len(chapters)} 章）")
+    result = build_summary_tree(
+        llm, store, video, chunks, chapters, progress=on_progress
+    )
+    sys.stdout.write("\n")
+    if result.video_title:
+        video.title = result.video_title[:80]
+    video.error = result.describe() if result.degraded else None
+    video.status = VideoStatus.READY
+    store.upsert_video(video)
+
+    embedder = build_embedder(cfg)
+    if embedder.available:
+        print("重建向量…")
+        fresh = store.get_chunks(video_id)
+        vecs = embedder.encode([c.combined_text for c in fresh])
+        store.upsert_embeddings(
+            video_id, zip([c.chunk_id for c in fresh], vecs, strict=False)
+        )
+
+    print(result.describe() if result.degraded else "摘要完成。")
+    for ch in store.get_chapters(video_id)[:10]:
+        print(f"  {ch.idx + 1}. {ch.title or '（无标题）'}")
+    store.close()
+    return 1 if result.degraded else 0
 
 
 def cmd_serve(args, cfg) -> int:
@@ -695,8 +883,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--live", action="store_true", help="发真实请求验证密钥是否可用")
     p.set_defaults(func=cmd_check)
 
-    p = sub.add_parser("ingest", help="入库一门课程视频")
-    p.add_argument("video", help="视频文件路径")
+    p = sub.add_parser("ingest", help="入库一门课程视频（本地路径或 URL）")
+    p.add_argument("video", help="视频文件路径，或 B 站/YouTube/直链 URL")
     p.add_argument("--no-summary", action="store_true", help="跳过 LLM 摘要（只做转写与索引）")
     p.add_argument("--no-slides", action="store_true", help="跳过课件抽帧与 OCR")
     p.add_argument(
@@ -705,6 +893,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="强制重新抽帧与 OCR（改了抽帧参数时用；默认会复用已有课件）",
     )
     p.set_defaults(func=cmd_ingest)
+
+    p = sub.add_parser("ingest-docs", help="批量导入文档课程（Markdown / 纯文本）")
+    p.add_argument("paths", nargs="*", help="一个或多个 .md / .txt / .markdown 路径")
+    p.add_argument("--folder", type=Path, default=None, help="递归扫描该目录下的文档")
+    p.add_argument("--no-summary", action="store_true", help="跳过 LLM 摘要（只做切分与索引）")
+    p.set_defaults(func=cmd_ingest_docs)
+
+    p = sub.add_parser("cookies", help="管理登录 Cookie（B 站等需登录站点）")
+    csub = p.add_subparsers(dest="cookies_action", required=True)
+    c1 = csub.add_parser("status", help="查看是否已导入 Cookie")
+    c1.set_defaults(func=cmd_cookies)
+    c2 = csub.add_parser("import", help="导入 Netscape cookies.txt")
+    c2.add_argument("file", help="浏览器扩展导出的 cookies.txt 路径")
+    c2.set_defaults(func=cmd_cookies)
+    c3 = csub.add_parser("clear", help="清除已保存的 Cookie")
+    c3.set_defaults(func=cmd_cookies)
 
     p = sub.add_parser("list", help="列出课程库")
     p.set_defaults(func=cmd_list)
@@ -729,6 +933,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="即使多数章节生成失败也覆盖已有 notes.md（默认保留旧文档，避免用残次品盖掉良品）",
     )
     p.set_defaults(func=cmd_notes)
+
+    p = sub.add_parser("summarize", help="只重跑分层摘要（补章节标题，不重新转写）")
+    p.add_argument("video", help="课程 ID 或标题片段")
+    p.set_defaults(func=cmd_summarize)
 
     p = sub.add_parser("serve", help="启动本地 Web UI")
     p.add_argument("--host", default="127.0.0.1")

@@ -1,11 +1,11 @@
 # vedioAI · 课程视频 AI 理解
 
-播放本地课程视频，用 AI 理解**全部内容**：语音转写、课件 OCR、带时间戳问答与学习文档。
+播放本地或在线课程视频，用 AI 理解**全部内容**：语音转写、课件 OCR、带时间戳问答与学习文档。
 
 核心思路：**一次入库、多次查询**。
 
 ```
-本地课程视频
+本地文件 / B站·YouTube·直链（yt-dlp）
    ├─ FFmpeg remux ──────────► H.264/AAC 播放代理
    ├─ FFmpeg 抽音频 ─────────► 16kHz 单声道 mp3
    │      └─ 火山录音文件识别 ─► 字级时间戳转写
@@ -24,7 +24,9 @@
 
 | 能力 | 说明 |
 |---|---|
-| 入库 | 本地视频 → 转写 + 课件 OCR + 摘要 + 索引 |
+| 入库 | 本地视频或链接（B 站 / YouTube / 直链）→ 转写 + 课件 OCR + 摘要 + 索引 |
+| 文档课 | Markdown / 纯文本批量导入；原文即教材（不生成视频式 `notes.md`）；同目录自动成系列 |
+| 登录 Cookie | 可选导入 Netscape cookies.txt，用于大会员等需登录内容（仅本机保存） |
 | 问答 | 带时间戳引用，可点击跳转；支持多轮会话与流式输出 |
 | 学习文档 | 分层生成 Markdown 笔记 |
 | 字幕 / 转写 | WebVTT 字幕轨 + 同步高亮转写面板 |
@@ -32,6 +34,7 @@
 | 进度续播 | 浏览器按课程记住播放位置 |
 | 错词纠正 | 界面标记「错→对」，写入术语表并局部修复（不重跑 ASR） |
 | 用量账本 | 查看本课 / 全库花了多少钱 |
+| 课内测验 | 按课程出选择题，交卷后看得分与讲解（可跳转时间） |
 | 课程系列 | 按源文件目录分组，支持系列内跨课问答 |
 
 单课事实型问题以**整稿长上下文直答**为主；检索用于引用定位、视觉取证和跨课场景。
@@ -82,9 +85,24 @@ retrieve:
 
 ```powershell
 .\.venv\Scripts\vedioai.exe ingest "D:\courses\lesson1.mp4"
+.\.venv\Scripts\vedioai.exe ingest "https://www.bilibili.com/video/BVxxxxxxxx"
+.\.venv\Scripts\vedioai.exe ingest-docs "D:\notes\ch01.md" "D:\notes\ch02.md"
+.\.venv\Scripts\vedioai.exe ingest-docs --folder "D:\notes\course-pack"
 .\.venv\Scripts\vedioai.exe serve --host 0.0.0.0 --port 17831
 # 打开 http://127.0.0.1:17831
 ```
+
+**文档课**：支持 `.md` / `.txt` / `.markdown`。一个文件一门课；批量可用多路径或 `--folder`（递归）。入库只做切分 + 轻量分层摘要 + 向量，**不跑 ASR / 播放代理**，也不生成视频风格的学习笔记——界面以原文阅读为主，问答与测验照常可用。同父目录仍按系列分组。Web 侧栏可「导入文档」（多选）或填目录路径批量入库。
+
+链接入库依赖 `yt-dlp`（已在依赖中）与本机 `ffmpeg`（B 站等站点合并音视频时需要）。  
+大会员 / 需登录内容：用浏览器扩展导出 Netscape `cookies.txt`，再：
+
+```powershell
+vedioai cookies import path\to\cookies.txt
+vedioai cookies status
+```
+
+界面侧栏也可「导入 Cookie」。Cookie 只存 `data/cookies/`，不进 git。请只用于你有权观看的内容。
 
 命令行：
 
@@ -93,9 +111,11 @@ vedioai list
 vedioai info <video_id>
 vedioai ask <video_id> "这门课一共讲了几种排序？"
 vedioai ask <video_id> "这里最坏复杂度是多少" --at 12:30
-vedioai notes <video_id>
+vedioai notes <video_id>            # 视频课学习文档（文档课请直接读原文）
+vedioai ingest-docs --folder DIR    # 批量文档课
 vedioai reindex [video_id]          # 补装嵌入模型后重建向量
 vedioai usage                       # 用量账本
+vedioai cookies status              # 登录 Cookie
 ```
 
 重跑入库会复用已有转写、播放代理与课件文字，**不会重复付 ASR 费用**。只重建向量用 `reindex`。先入库后装 OCR 时，再跑一次 `ingest` 会自动补齐课件文字；改了抽帧参数可用 `--refresh-slides`。

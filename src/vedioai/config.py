@@ -157,6 +157,11 @@ class Config:
         return self.data_dir / "library"
 
     @property
+    def downloads_dir(self) -> Path:
+        """URL 入库的下载缓存（与 library 分离，便于清理）。"""
+        return self.data_dir / "downloads"
+
+    @property
     def db_path(self) -> Path:
         return self.data_dir / "vedioai.db"
 
@@ -238,4 +243,5 @@ def load_config(config_path: Path | None = None) -> Config:
 
     cfg.data_dir.mkdir(parents=True, exist_ok=True)
     cfg.library_dir.mkdir(parents=True, exist_ok=True)
+    cfg.downloads_dir.mkdir(parents=True, exist_ok=True)
     return cfg
